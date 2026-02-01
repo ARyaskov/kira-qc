@@ -1,0 +1,39 @@
+[package]
+name = "kira-qc"
+description = "FastQC-compatible QC tool written in Rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/ARyaskov/kira-qc"
+keywords = [
+    "bioinformatics",
+    "genomics",
+    "quality-control",
+    "dna",
+    "fastq"
+]
+categories = [
+    "science",
+    "science::bioinformatics",
+    "science::bioinformatics::sequence-analysis",
+    "command-line-utilities",
+    "algorithms"
+]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+crossbeam-channel = "0.5"
+memchr = "2"
+num_cpus = "1"
+flate2 = "1"
+zip = "7.2.0"
+aho-corasick = "1"
+gzp = "2.0.2"
+svg2pdf = "0.13"
+
+[features]
+default = []
+no-kmer = []
