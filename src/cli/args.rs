@@ -1,6 +1,12 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+fn default_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+}
+
 #[derive(Parser)]
 #[command(name = "kira-qc", version, about = "FastQC-style QC for plain FASTQ")]
 pub struct Cli {
@@ -20,7 +26,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub out: PathBuf,
 
-    #[arg(long, default_value_t = num_cpus::get())]
+    #[arg(long, default_value_t = default_threads())]
     pub threads: usize,
 
     #[arg(long)]

@@ -3,6 +3,8 @@ mod aarch64_neon;
 mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod x86_avx2;
+#[cfg(target_arch = "x86_64")]
+use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
 pub const KMER_CHUNK: usize = 32;
@@ -11,10 +13,23 @@ pub const KMER_CHUNK: usize = 16;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub const KMER_CHUNK: usize = 16;
 
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx2_available() -> bool {
+    static AVX2: OnceLock<bool> = OnceLock::new();
+    *AVX2.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+}
+
 pub fn count_bases(seq: &[u8]) -> (u32, u32, u32, u32, u32) {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::count_bases_avx2(seq);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::count_bases_avx2(seq);
+            }
+        }
+        return scalar::count_bases(seq);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -28,8 +43,14 @@ pub fn count_bases(seq: &[u8]) -> (u32, u32, u32, u32, u32) {
 
 pub fn sum_qual(qual: &[u8], offset: u8) -> u32 {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::sum_qual_avx2(qual, offset);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::sum_qual_avx2(qual, offset);
+            }
+        }
+        return scalar::sum_qual(qual, offset);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -46,8 +67,14 @@ pub fn prefix_scan(seq: &[u8], prefix: &[u8]) -> bool {
         return false;
     }
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::prefix_scan_avx2(seq, prefix);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::prefix_scan_avx2(seq, prefix);
+            }
+        }
+        return scalar::prefix_scan(seq, prefix);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -61,8 +88,14 @@ pub fn prefix_scan(seq: &[u8], prefix: &[u8]) -> bool {
 
 pub fn encode_acgt_chunk(seq: &[u8], out: &mut [u8]) -> u32 {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::encode_acgt_chunk_avx2(seq, out);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::encode_acgt_chunk_avx2(seq, out);
+            }
+        }
+        return scalar::encode_acgt_chunk_scalar(seq, out);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -76,8 +109,14 @@ pub fn encode_acgt_chunk(seq: &[u8], out: &mut [u8]) -> u32 {
 
 pub fn acgt_2bit_encode_block(input: &[u8; 16]) -> (u16, [u8; 16]) {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::acgt_2bit_encode_block_avx2(input);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::acgt_2bit_encode_block_avx2(input);
+            }
+        }
+        return scalar::acgt_2bit_encode_block_scalar(input);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -91,8 +130,14 @@ pub fn acgt_2bit_encode_block(input: &[u8; 16]) -> (u16, [u8; 16]) {
 
 pub fn acgt_2bit_block_16(input_ptr: *const u8) -> (u16, u32) {
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        return x86_avx2::acgt_2bit_block_16_avx2(input_ptr);
+    {
+        if avx2_available() {
+            // SAFETY: guarded by runtime AVX2 CPU feature detection.
+            unsafe {
+                return x86_avx2::acgt_2bit_block_16_avx2(input_ptr);
+            }
+        }
+        return scalar::acgt_2bit_block_16_scalar(input_ptr);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {

@@ -1,9 +1,9 @@
 [package]
 name = "kira-qc"
 description = "FastQC-compatible QC tool written in Rust"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-qc"
 keywords = [
@@ -24,14 +24,10 @@ categories = [
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-memmap2 = "0.9"
 crossbeam-channel = "0.5"
-memchr = "2"
-num_cpus = "1"
-flate2 = "1"
+kira-fastq = "0.1.0"
 zip = "7.2.0"
 aho-corasick = "1"
-gzp = "2.0.2"
 svg2pdf = "0.13"
 
 [features]
