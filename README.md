@@ -35,7 +35,7 @@ QC with a dedicated long-read mode for ONT/PacBio data.
 
 ## Installation
 
-Install from crates.io (Rust 1.91+ / Windows / Linux / macOS):
+Install from crates.io (Rust 1.95+ / Windows / Linux / macOS):
 
 ```bash
 cargo install kira-qc
@@ -43,7 +43,7 @@ cargo install kira-qc
 
 Or
 
-From source (Rust 1.91+):
+From source (Rust 1.95+):
 
 ```
 # build
