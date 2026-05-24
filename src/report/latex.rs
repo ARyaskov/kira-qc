@@ -1,5 +1,5 @@
-use crate::core::engine::RunOutput;
-use crate::core::model::Mode;
+use crate::core::metrics::FinalMetrics;
+use crate::core::model::{FinalizeContext, Mode};
 use crate::report::html;
 use anyhow::{Context, Result};
 use std::fs;
@@ -16,143 +16,147 @@ pub enum LatexMode {
     Supplement,
 }
 
-pub fn write(out_dir: &Path, output: &RunOutput, mode: LatexMode) -> Result<()> {
-    let metrics = output.agg.finalize(&output.ctx);
+pub fn write(
+    out_dir: &Path,
+    metrics: &FinalMetrics,
+    ctx: &FinalizeContext,
+    mode: LatexMode,
+) -> Result<()> {
     let latex_dir = out_dir.join("latex");
     let figures_dir = latex_dir.join("figures");
     let tables_dir = latex_dir.join("tables");
     fs::create_dir_all(&figures_dir)?;
     fs::create_dir_all(&tables_dir)?;
 
-    write_basic_stats_table(&tables_dir, &metrics, &output.ctx.file_name)?;
+    write_basic_stats_table(&tables_dir, metrics, &ctx.file_name)?;
 
     let mut figures: Vec<Figure> = Vec::new();
     match mode {
         LatexMode::Summary => {
-            if output.ctx.mode == Mode::Short {
+            if ctx.mode == Mode::Short {
                 figures.push(fig(
                     "per_base_quality",
                     "Per base sequence quality",
-                    html::latex_svg_per_base_quality(&metrics)?,
+                    html::latex_svg_per_base_quality(metrics)?,
                 ));
                 figures.push(fig(
                     "per_sequence_quality",
                     "Per sequence quality scores",
-                    html::latex_svg_per_seq_quality(&metrics)?,
+                    html::latex_svg_per_seq_quality(metrics)?,
                 ));
                 figures.push(fig(
                     "duplication_levels",
                     "Sequence duplication levels",
-                    html::latex_svg_duplication(&metrics)?,
+                    html::latex_svg_duplication(metrics)?,
                 ));
                 if metrics.statuses.adapter_content != crate::core::model::Status::Pass {
                     figures.push(fig(
                         "adapter_content",
                         "Adapter content",
-                        html::latex_svg_adapter_content(&metrics)?,
+                        html::latex_svg_adapter_content(metrics)?,
                     ));
                 }
             } else {
                 figures.push(fig(
                     "sequence_length_distribution",
                     "Sequence length distribution",
-                    html::latex_svg_length_dist(&metrics)?,
+                    html::latex_svg_length_dist(metrics)?,
                 ));
                 figures.push(fig(
                     "per_sequence_quality",
                     "Per sequence quality scores",
-                    html::latex_svg_per_seq_quality(&metrics)?,
+                    html::latex_svg_per_seq_quality(metrics)?,
                 ));
                 if metrics.statuses.adapter_content != crate::core::model::Status::Pass {
                     figures.push(fig(
                         "adapter_content",
                         "Adapter content",
-                        html::latex_svg_adapter_content(&metrics)?,
+                        html::latex_svg_adapter_content(metrics)?,
                     ));
                 }
             }
         }
         LatexMode::Supplement => {
-            if output.ctx.mode == Mode::Short {
+            if ctx.mode == Mode::Short {
                 figures.extend([
                     fig(
                         "per_base_quality",
                         "Per base sequence quality",
-                        html::latex_svg_per_base_quality(&metrics)?,
+                        html::latex_svg_per_base_quality(metrics)?,
                     ),
                     fig(
                         "per_sequence_quality",
                         "Per sequence quality scores",
-                        html::latex_svg_per_seq_quality(&metrics)?,
+                        html::latex_svg_per_seq_quality(metrics)?,
                     ),
                     fig(
                         "per_base_content",
                         "Per base sequence content",
-                        html::latex_svg_per_base_content(&metrics)?,
+                        html::latex_svg_per_base_content(metrics)?,
                     ),
                     fig(
                         "per_sequence_gc",
                         "Per sequence GC content",
-                        html::latex_svg_per_seq_gc(&metrics)?,
+                        html::latex_svg_per_seq_gc(metrics)?,
                     ),
                     fig(
                         "per_base_n",
                         "Per base N content",
-                        html::latex_svg_per_base_n(&metrics)?,
+                        html::latex_svg_per_base_n(metrics)?,
                     ),
                     fig(
                         "sequence_length_distribution",
                         "Sequence length distribution",
-                        html::latex_svg_length_dist(&metrics)?,
+                        html::latex_svg_length_dist(metrics)?,
                     ),
                     fig(
                         "duplication_levels",
                         "Sequence duplication levels",
-                        html::latex_svg_duplication(&metrics)?,
+                        html::latex_svg_duplication(metrics)?,
                     ),
                     fig(
                         "overrepresented_sequences",
                         "Overrepresented sequences",
-                        html::latex_svg_overrep(&metrics)?,
+                        html::latex_svg_overrep(metrics)?,
                     ),
                     fig(
                         "adapter_content",
                         "Adapter content",
-                        html::latex_svg_adapter_content(&metrics)?,
+                        html::latex_svg_adapter_content(metrics)?,
                     ),
                 ]);
                 #[cfg(not(feature = "no-kmer"))]
                 figures.push(fig(
                     "kmer_content",
                     "Kmer content",
-                    html::latex_svg_kmer_content(&metrics)?,
+                    html::latex_svg_kmer_content(metrics)?,
                 ));
             } else {
                 figures.extend([
                     fig(
                         "sequence_length_distribution",
                         "Sequence length distribution",
-                        html::latex_svg_length_dist(&metrics)?,
+                        html::latex_svg_length_dist(metrics)?,
                     ),
                     fig(
                         "per_sequence_quality",
                         "Per sequence quality scores",
-                        html::latex_svg_per_seq_quality(&metrics)?,
+                        html::latex_svg_per_seq_quality(metrics)?,
                     ),
                     fig(
                         "per_sequence_gc",
                         "Per sequence GC content",
-                        html::latex_svg_per_seq_gc(&metrics)?,
+                        html::latex_svg_per_seq_gc(metrics)?,
                     ),
                     fig(
                         "per_sequence_n",
                         "Per sequence N content",
-                        html::latex_svg_per_seq_n(&metrics)?,
+                        html::latex_svg_per_seq_n(metrics)?,
                     ),
                     fig(
                         "adapter_content",
                         "Adapter content",
-                        html::latex_svg_adapter_content(&metrics)?,
+                        html::latex_svg_adapter_content(metrics)?,
                     ),
                 ]);
             }
@@ -161,13 +165,7 @@ pub fn write(out_dir: &Path, output: &RunOutput, mode: LatexMode) -> Result<()> 
 
     write_figures(&figures_dir, &figures)?;
     write_readme(&latex_dir)?;
-    write_tex(
-        &latex_dir,
-        &output.ctx.file_name,
-        output.ctx.mode,
-        mode,
-        &figures,
-    )?;
+    write_tex(&latex_dir, &ctx.file_name, ctx.mode, mode, &figures)?;
     write_latex_zip(&latex_dir)?;
     Ok(())
 }
@@ -196,11 +194,7 @@ fn write_figures(dir: &Path, figures: &[Figure]) -> Result<()> {
     Ok(())
 }
 
-fn write_basic_stats_table(
-    tables_dir: &Path,
-    metrics: &crate::core::metrics::FinalMetrics,
-    file: &str,
-) -> Result<()> {
+fn write_basic_stats_table(tables_dir: &Path, metrics: &FinalMetrics, file: &str) -> Result<()> {
     let mut out = String::new();
     out.push_str("\\begin{tabular}{ll}\n");
     out.push_str("\\toprule\n");
@@ -209,11 +203,11 @@ fn write_basic_stats_table(
     out.push_str(&format!("Filename & {} \\\\\n", escape_tex(file)));
     out.push_str(&format!(
         "File type & {} \\\\\n",
-        escape_tex(&metrics.basic.file_type)
+        escape_tex(metrics.basic.file_type)
     ));
     out.push_str(&format!(
         "Encoding & {} \\\\\n",
-        escape_tex(&metrics.basic.encoding)
+        escape_tex(metrics.basic.encoding)
     ));
     out.push_str(&format!(
         "Total Sequences & {} \\\\\n",
@@ -343,7 +337,7 @@ fn fmt_int(v: u64) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     let len = s.len();
     for (i, ch) in s.chars().enumerate() {
-        if i != 0 && (len - i) % 3 == 0 {
+        if i != 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

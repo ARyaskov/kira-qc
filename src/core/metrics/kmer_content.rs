@@ -1,17 +1,13 @@
+//! Exact k-mer counting with K=7 (4^K = 16384 buckets per position bin).
+
 #[cfg(not(feature = "no-kmer"))]
 mod real {
     use crate::core::metrics::UpdateTimings;
-    use crate::simd;
-    use std::cmp::Reverse;
-    use std::collections::{BinaryHeap, HashMap};
     use std::time::Instant;
 
     pub const K: usize = 7;
     pub const BINS: usize = 10;
-    const CMS_DEPTH: usize = 4;
-    const CMS_WIDTH: usize = 1 << 18;
-    // Per-bin heavy hitters; sized for stability while keeping memory bounded.
-    const HH_K: usize = 2000;
+    pub const KMER_SPACE: usize = 1 << (2 * K);
     const MAX_REPORT: usize = 50;
 
     #[derive(Clone, Debug)]
@@ -24,148 +20,56 @@ mod real {
     }
 
     #[derive(Clone, Debug)]
-    pub struct Cms {
-        data: Vec<u32>,
+    pub struct BinCounts {
+        cells: Vec<u32>,
     }
 
-    impl Cms {
+    impl Default for BinCounts {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl BinCounts {
+        #[inline]
         pub fn new() -> Self {
             Self {
-                data: vec![0u32; CMS_DEPTH * CMS_WIDTH],
-            }
-        }
-
-        pub fn add(&mut self, key: u64, weight: u32) {
-            for d in 0..CMS_DEPTH {
-                let idx = self.index(key, d);
-                let slot = &mut self.data[d * CMS_WIDTH + idx];
-                *slot = slot.saturating_add(weight);
-            }
-        }
-
-        pub fn estimate(&self, key: u64) -> u32 {
-            let mut min = u32::MAX;
-            for d in 0..CMS_DEPTH {
-                let idx = self.index(key, d);
-                let v = self.data[d * CMS_WIDTH + idx];
-                if v < min {
-                    min = v;
-                }
-            }
-            if min == u32::MAX { 0 } else { min }
-        }
-
-        pub fn merge(&mut self, other: &Cms) {
-            for i in 0..self.data.len() {
-                self.data[i] = self.data[i].saturating_add(other.data[i]);
+                cells: vec![0u32; KMER_SPACE],
             }
         }
 
         #[inline]
-        fn index(&self, key: u64, depth: usize) -> usize {
-            let mut x = key ^ ((depth as u64).wrapping_mul(0x9e3779b97f4a7c15));
-            x ^= x >> 33;
-            x = x.wrapping_mul(0xff51afd7ed558ccd);
-            x ^= x >> 33;
-            (x as usize) & (CMS_WIDTH - 1)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct Entry {
-        key: u64,
-        count: u64,
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct SpaceSaving {
-        map: HashMap<u64, usize>,
-        entries: Vec<Entry>,
-        heap: BinaryHeap<(Reverse<u64>, u64, usize)>,
-    }
-
-    impl SpaceSaving {
-        pub fn new() -> Self {
-            Self {
-                map: HashMap::with_capacity(HH_K),
-                entries: Vec::with_capacity(HH_K),
-                heap: BinaryHeap::with_capacity(HH_K),
-            }
+        pub fn add(&mut self, key: u16) {
+            let c = &mut self.cells[key as usize];
+            *c = c.saturating_add(1);
         }
 
-        pub fn add(&mut self, key: u64, weight: u64) {
-            if let Some(&idx) = self.map.get(&key) {
-                let e = &mut self.entries[idx];
-                e.count += weight;
-                self.heap.push((Reverse(e.count), e.key, idx));
-                return;
-            }
-
-            if self.entries.len() < HH_K {
-                let idx = self.entries.len();
-                self.entries.push(Entry { key, count: weight });
-                self.map.insert(key, idx);
-                self.heap.push((Reverse(weight), key, idx));
-                return;
-            }
-
-            let (min_idx, min_count) = self.min_entry();
-            let removed = self.entries[min_idx].key;
-            self.map.remove(&removed);
-            self.entries[min_idx] = Entry {
-                key,
-                count: min_count + weight,
-            };
-            self.map.insert(key, min_idx);
-            self.heap.push((Reverse(min_count + weight), key, min_idx));
+        #[inline]
+        pub fn get(&self, key: u16) -> u32 {
+            self.cells[key as usize]
         }
 
-        pub fn merge(&mut self, other: &SpaceSaving) {
-            let mut items = other.entries.clone();
-            items.sort_by_key(|e| e.key);
-            for e in items {
-                self.add(e.key, e.count);
-            }
-        }
-
-        pub fn keys(&self) -> Vec<u64> {
-            self.entries.iter().map(|e| e.key).collect()
-        }
-
-        fn min_entry(&mut self) -> (usize, u64) {
-            loop {
-                if let Some((Reverse(count), key, idx)) = self.heap.pop() {
-                    let e = &self.entries[idx];
-                    if e.key == key && e.count == count {
-                        return (idx, count);
-                    }
-                } else {
-                    return (0, self.entries[0].count);
-                }
+        pub fn merge(&mut self, other: &BinCounts) {
+            debug_assert_eq!(self.cells.len(), other.cells.len());
+            for (a, &b) in self.cells.iter_mut().zip(other.cells.iter()) {
+                *a = a.saturating_add(b);
             }
         }
     }
 
-    pub fn encode_kmer(seq: &[u8]) -> Option<u64> {
-        if seq.len() != K {
-            return None;
+    /// 2-bit base encoding: first base of the k-mer in the high bits.
+    #[inline]
+    fn base_code(b: u8) -> Option<u64> {
+        match b & 0xDF {
+            b'A' => Some(0),
+            b'C' => Some(1),
+            b'G' => Some(2),
+            b'T' => Some(3),
+            _ => None,
         }
-        let mut v = 0u64;
-        for &b in seq {
-            let u = b & 0xDF;
-            let bits = match u {
-                b'A' => 0u64,
-                b'C' => 1u64,
-                b'G' => 2u64,
-                b'T' => 3u64,
-                _ => return None,
-            };
-            v = (v << 2) | bits;
-        }
-        Some(v)
     }
 
-    pub fn decode_kmer(mut key: u64) -> String {
+    pub fn decode_kmer(mut key: u16) -> String {
         let mut buf = [b'A'; K];
         for i in (0..K).rev() {
             let bits = (key & 0x3) as u8;
@@ -177,16 +81,8 @@ mod real {
             };
             key >>= 2;
         }
-        String::from_utf8_lossy(&buf).to_string()
-    }
-
-    pub fn pos_bin(pos: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        let pct = ((pos + 1) * 100) / len;
-        let bin = pct / 10;
-        if bin >= BINS { BINS - 1 } else { bin }
+        // SAFETY: buf is ASCII-only by construction.
+        unsafe { String::from_utf8_unchecked(buf.to_vec()) }
     }
 
     pub fn bin_mid_percent(bin: usize) -> u32 {
@@ -220,262 +116,117 @@ mod real {
     #[inline(always)]
     fn next_bin_threshold(len: usize, bin: usize) -> usize {
         let t = (bin + 1) * 10;
-        ((t * len) + 99) / 100
+        (t * len).div_ceil(100)
     }
 
+    /// Single rolling-hash pass over the read; Ns reset the run.
     pub fn update_kmers(
         seq: &[u8],
         len: usize,
-        cms: &mut [Cms],
-        hh: &mut [SpaceSaving],
+        counts: &mut [BinCounts],
         bin_counts: &mut [u64; BINS],
         total: &mut u64,
-        mut timing: Option<&mut UpdateTimings>,
+        timing: Option<&mut UpdateTimings>,
     ) {
         if len < K {
             return;
         }
-        let t_total: Option<Instant> = timing.as_deref_mut().map(|_| Instant::now());
-        let mask: u64 = (1u64 << (2 * K)) - 1;
-        let mut pos: usize = 0;
-        let mut bin = 0usize;
+        let t_total = timing.as_ref().map(|_| Instant::now());
+
+        const MASK: u64 = (1u64 << (2 * K)) - 1;
+        let mut rolling: u64 = 0;
+        let mut valid_run: usize = 0;
+        let mut bin: usize = 0;
         let mut next_threshold = next_bin_threshold(len, bin);
-        let mut carry_bits: u64 = 0;
-        let mut carry_len: usize = 0;
 
-        const BATCH: usize = 256;
-        let mut batch_keys: [u16; BATCH] = [0u16; BATCH];
-        let mut batch_bins: [u8; BATCH] = [0u8; BATCH];
-        let mut batch_len: usize = 0;
+        let mut updates: u64 = 0;
 
-        #[inline(always)]
-        fn flush_batch(
-            batch_len: &mut usize,
-            keys: &mut [u16; BATCH],
-            bins: &mut [u8; BATCH],
-            cms: &mut [Cms],
-            hh: &mut [SpaceSaving],
-            bin_counts: &mut [u64; BINS],
-            total: &mut u64,
-            timing: Option<&mut UpdateTimings>,
-        ) {
-            let len = *batch_len;
-            if len == 0 {
-                return;
-            }
-            if let Some(t) = timing {
-                for i in 0..len {
-                    let bin = bins[i] as usize;
-                    let key = keys[i] as u64;
-                    let t0 = Instant::now();
-                    cms[bin].add(key, 1);
-                    t.kmer_cms += t0.elapsed();
-                    let t1 = Instant::now();
-                    hh[bin].add(key, 1);
-                    t.kmer_hh += t1.elapsed();
-                    bin_counts[bin] += 1;
-                    *total += 1;
-                }
-            } else {
-                for i in 0..len {
-                    let bin = bins[i] as usize;
-                    let key = keys[i] as u64;
-                    cms[bin].add(key, 1);
-                    hh[bin].add(key, 1);
-                    bin_counts[bin] += 1;
-                    *total += 1;
-                }
-            }
-            *batch_len = 0;
-        }
-
-        while pos + 16 <= len {
-            let t_encode: Option<Instant> = timing.as_deref_mut().map(|_| Instant::now());
-            let (valid_mask, packed_codes) =
-                simd::acgt_2bit_block_16(unsafe { seq.as_ptr().add(pos) });
-            if let (Some(t), Some(t0)) = (timing.as_deref_mut(), t_encode) {
-                t.kmer_encode += t0.elapsed();
-            }
-
-            let combined_len = carry_len + 16;
-            let mut vbits: u32 = if carry_len == 0 {
-                valid_mask as u32
-            } else {
-                ((valid_mask as u32) << carry_len) | ((1u32 << carry_len) - 1)
-            };
-            if combined_len < 32 {
-                vbits &= (1u32 << combined_len) - 1;
-            }
-
-            let mut w = vbits;
-            w &= w >> 1;
-            w &= w >> 2;
-            w &= w >> 3;
-            w &= w >> 4;
-            w &= w >> 5;
-            w &= w >> 6;
-            let max_start = combined_len - K;
-            if max_start < 31 {
-                w &= (1u32 << (max_start + 1)) - 1;
-            }
-
-            let stream_bits: u64 = carry_bits | ((packed_codes as u64) << (2 * carry_len));
-            let base_start = pos - carry_len;
-
-            if let Some(t) = timing.as_deref_mut() {
-                let t0 = Instant::now();
-                let mut m = w;
-                while m != 0 {
-                    let i = m.trailing_zeros() as usize;
-                    let start_pos = base_start + i;
-                    let start_pos_plus1 = start_pos + 1;
-                    let t_bin = Instant::now();
-                    while bin + 1 < BINS && start_pos_plus1 >= next_threshold {
-                        bin += 1;
-                        next_threshold = next_bin_threshold(len, bin);
+        for (pos, &b) in seq.iter().enumerate() {
+            match base_code(b) {
+                Some(code) => {
+                    rolling = ((rolling << 2) | code) & MASK;
+                    if valid_run < K {
+                        valid_run += 1;
                     }
-                    t.kmer_binning += t_bin.elapsed();
-                    let key = ((stream_bits >> (2 * i)) & mask) as u16;
-                    batch_keys[batch_len] = key;
-                    batch_bins[batch_len] = bin as u8;
-                    batch_len += 1;
-                    t.kmer_updates += 1;
-                    if batch_len == BATCH {
-                        flush_batch(
-                            &mut batch_len,
-                            &mut batch_keys,
-                            &mut batch_bins,
-                            cms,
-                            hh,
-                            bin_counts,
-                            total,
-                            Some(t),
-                        );
-                    }
-                    m &= m - 1;
                 }
-                t.kmer_keygen += t0.elapsed();
-            } else {
-                let mut m = w;
-                while m != 0 {
-                    let i = m.trailing_zeros() as usize;
-                    let start_pos = base_start + i;
-                    let start_pos_plus1 = start_pos + 1;
-                    while bin + 1 < BINS && start_pos_plus1 >= next_threshold {
-                        bin += 1;
-                        next_threshold = next_bin_threshold(len, bin);
-                    }
-                    let key = ((stream_bits >> (2 * i)) & mask) as u16;
-                    batch_keys[batch_len] = key;
-                    batch_bins[batch_len] = bin as u8;
-                    batch_len += 1;
-                    if batch_len == BATCH {
-                        flush_batch(
-                            &mut batch_len,
-                            &mut batch_keys,
-                            &mut batch_bins,
-                            cms,
-                            hh,
-                            bin_counts,
-                            total,
-                            None,
-                        );
-                    }
-                    m &= m - 1;
-                }
-            }
-
-            let mut suffix = 0usize;
-            for s in 0..combined_len.min(6) {
-                let idx = combined_len - 1 - s;
-                if ((vbits >> idx) & 1) != 0 {
-                    suffix += 1;
-                } else {
-                    break;
-                }
-            }
-            carry_len = suffix;
-            if carry_len > 0 {
-                let shift = 2 * (combined_len - carry_len);
-                carry_bits = (stream_bits >> shift) & ((1u64 << (2 * carry_len)) - 1);
-            } else {
-                carry_bits = 0;
-            }
-            pos += 16;
-        }
-
-        let mut rolling = carry_bits;
-        let mut valid_run = carry_len;
-        let t_tail: Option<Instant> = timing.as_deref_mut().map(|_| Instant::now());
-        while pos < len {
-            let b = seq[pos] & 0xDF;
-            let bits = match b {
-                b'A' => 0u64,
-                b'C' => 1u64,
-                b'G' => 2u64,
-                b'T' => 3u64,
-                _ => {
+                None => {
                     valid_run = 0;
                     rolling = 0;
-                    pos += 1;
                     continue;
                 }
-            };
-            if valid_run < K {
-                valid_run += 1;
             }
-            rolling = ((rolling << 2) | bits) & mask;
             if valid_run >= K {
                 let start_pos_plus1 = pos + 2 - K;
-                if let Some(t) = timing.as_deref_mut() {
-                    let t_bin = Instant::now();
-                    while bin + 1 < BINS && start_pos_plus1 >= next_threshold {
-                        bin += 1;
-                        next_threshold = next_bin_threshold(len, bin);
-                    }
-                    t.kmer_binning += t_bin.elapsed();
-                    t.kmer_updates += 1;
-                } else {
-                    while bin + 1 < BINS && start_pos_plus1 >= next_threshold {
-                        bin += 1;
-                        next_threshold = next_bin_threshold(len, bin);
-                    }
+                while bin + 1 < BINS && start_pos_plus1 >= next_threshold {
+                    bin += 1;
+                    next_threshold = next_bin_threshold(len, bin);
                 }
-                batch_keys[batch_len] = rolling as u16;
-                batch_bins[batch_len] = bin as u8;
-                batch_len += 1;
-                if batch_len == BATCH {
-                    flush_batch(
-                        &mut batch_len,
-                        &mut batch_keys,
-                        &mut batch_bins,
-                        cms,
-                        hh,
-                        bin_counts,
-                        total,
-                        timing.as_deref_mut(),
-                    );
+                counts[bin].add(rolling as u16);
+                bin_counts[bin] += 1;
+                *total += 1;
+                updates += 1;
+            }
+        }
+
+        if let (Some(t0), Some(t)) = (t_total, timing) {
+            t.kmer += t0.elapsed();
+            t.kmer_updates += updates;
+        }
+    }
+
+    /// Rows for k-mers whose obs/exp in any bin is ≥ 3.0 (FastQC heuristic).
+    pub fn build_rows(
+        counts: &[BinCounts],
+        bin_counts: &[u64; BINS],
+        total: u64,
+    ) -> (Vec<KmerRow>, crate::core::model::Status) {
+        use crate::core::model::Status;
+        let mut rows = Vec::new();
+        let mut status = Status::Pass;
+        if total == 0 {
+            return (rows, status);
+        }
+
+        for key in 0..(KMER_SPACE as u16) {
+            let total_for_key: u64 = counts.iter().map(|c| c.get(key) as u64).sum();
+            if total_for_key == 0 {
+                continue;
+            }
+            let expected = total_for_key as f64 / total as f64;
+            if expected == 0.0 {
+                continue;
+            }
+            let mut max_obs = 0.0f64;
+            let mut max_bin = 0usize;
+            for (b, bc) in counts.iter().enumerate() {
+                let denom = bin_counts[b] as f64;
+                if denom == 0.0 {
+                    continue;
+                }
+                let obs = bc.get(key) as f64 / denom;
+                let obs_exp = obs / expected;
+                if obs_exp > max_obs {
+                    max_obs = obs_exp;
+                    max_bin = b;
                 }
             }
-            pos += 1;
+            if max_obs >= 3.0 {
+                if max_obs >= 5.0 {
+                    status = Status::Fail;
+                } else if status != Status::Fail {
+                    status = Status::Warn;
+                }
+                rows.push(KmerRow {
+                    sequence: decode_kmer(key),
+                    count: total_for_key,
+                    p_value: compute_pvalue(max_obs),
+                    obs_exp: max_obs,
+                    max_pos: bin_mid_percent(max_bin),
+                });
+            }
         }
-        if let (Some(t), Some(t0)) = (timing.as_deref_mut(), t_tail) {
-            t.kmer_keygen += t0.elapsed();
-        }
-        flush_batch(
-            &mut batch_len,
-            &mut batch_keys,
-            &mut batch_bins,
-            cms,
-            hh,
-            bin_counts,
-            total,
-            timing.as_deref_mut(),
-        );
-
-        if let (Some(t), Some(t0)) = (timing.as_deref_mut(), t_total) {
-            t.kmer += t0.elapsed();
-        }
+        select_top(&mut rows);
+        (rows, status)
     }
 }
 
@@ -484,8 +235,11 @@ pub use real::*;
 
 #[cfg(feature = "no-kmer")]
 mod stub {
+    use crate::core::model::Status;
+
     pub const K: usize = 7;
     pub const BINS: usize = 10;
+    pub const KMER_SPACE: usize = 1 << (2 * K);
 
     #[derive(Clone, Debug)]
     pub struct KmerRow {
@@ -496,40 +250,22 @@ mod stub {
         pub max_pos: u32,
     }
 
-    #[derive(Clone, Debug)]
-    pub struct Cms;
+    #[derive(Clone, Debug, Default)]
+    pub struct BinCounts;
 
-    impl Cms {
+    impl BinCounts {
         pub fn new() -> Self {
             Self
         }
-        pub fn add(&mut self, _key: u64, _weight: u32) {}
-        pub fn estimate(&self, _key: u64) -> u32 {
+        pub fn add(&mut self, _key: u16) {}
+        pub fn get(&self, _key: u16) -> u32 {
             0
         }
-        pub fn merge(&mut self, _other: &Cms) {}
+        pub fn merge(&mut self, _other: &BinCounts) {}
     }
 
-    #[derive(Clone, Debug)]
-    pub struct SpaceSaving;
-
-    impl SpaceSaving {
-        pub fn new() -> Self {
-            Self
-        }
-        pub fn add(&mut self, _key: u64, _weight: u64) {}
-        pub fn merge(&mut self, _other: &SpaceSaving) {}
-        pub fn keys(&self) -> Vec<u64> {
-            Vec::new()
-        }
-    }
-
-    pub fn decode_kmer(_key: u64) -> String {
+    pub fn decode_kmer(_key: u16) -> String {
         String::new()
-    }
-
-    pub fn pos_bin(_pos: usize, _len: usize) -> usize {
-        0
     }
 
     pub fn bin_mid_percent(_bin: usize) -> u32 {
@@ -545,12 +281,19 @@ mod stub {
     pub fn update_kmers(
         _seq: &[u8],
         _len: usize,
-        _cms: &mut [Cms],
-        _hh: &mut [SpaceSaving],
+        _counts: &mut [BinCounts],
         _bin_counts: &mut [u64; BINS],
         _total: &mut u64,
         _timing: Option<&mut crate::core::metrics::UpdateTimings>,
     ) {
+    }
+
+    pub fn build_rows(
+        _counts: &[BinCounts],
+        _bin_counts: &[u64; BINS],
+        _total: u64,
+    ) -> (Vec<KmerRow>, Status) {
+        (Vec::new(), Status::Pass)
     }
 }
 

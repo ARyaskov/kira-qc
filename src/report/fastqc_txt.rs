@@ -1,47 +1,42 @@
-use crate::core::engine::RunOutput;
-use crate::core::model::Mode;
+use crate::core::metrics::FinalMetrics;
+use crate::core::model::{FinalizeContext, Mode};
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
-    let metrics = output.agg.finalize(&output.ctx);
+pub fn write(path: &Path, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
     let mut w =
         BufWriter::new(File::create(path).with_context(|| "create fastqc_data.txt failed")?);
 
-    write_basic(&mut w, &metrics, &output.ctx.file_name)?;
-    match output.ctx.mode {
+    write_basic(&mut w, metrics, &ctx.file_name)?;
+    match ctx.mode {
         Mode::Short => {
-            write_per_base_quality(&mut w, &metrics)?;
-            write_per_seq_quality(&mut w, &metrics)?;
-            write_per_base_content(&mut w, &metrics)?;
-            write_per_seq_gc(&mut w, &metrics)?;
-            write_per_base_n(&mut w, &metrics)?;
-            write_length_dist_short(&mut w, &metrics)?;
-            write_duplication(&mut w, &metrics)?;
-            write_overrep(&mut w, &metrics)?;
-            write_adapter_content_short(&mut w, &metrics)?;
+            write_per_base_quality(&mut w, metrics)?;
+            write_per_seq_quality(&mut w, metrics)?;
+            write_per_base_content(&mut w, metrics)?;
+            write_per_seq_gc(&mut w, metrics)?;
+            write_per_base_n(&mut w, metrics)?;
+            write_length_dist_short(&mut w, metrics)?;
+            write_duplication(&mut w, metrics)?;
+            write_overrep(&mut w, metrics)?;
+            write_adapter_content_short(&mut w, metrics)?;
             #[cfg(not(feature = "no-kmer"))]
-            write_kmer_content(&mut w, &metrics)?;
+            write_kmer_content(&mut w, metrics)?;
         }
         Mode::Long => {
-            write_length_dist_long(&mut w, &metrics)?;
-            write_per_seq_quality(&mut w, &metrics)?;
-            write_per_seq_gc(&mut w, &metrics)?;
-            write_per_seq_n(&mut w, &metrics)?;
-            write_adapter_content_long(&mut w, &metrics)?;
+            write_length_dist_long(&mut w, metrics)?;
+            write_per_seq_quality(&mut w, metrics)?;
+            write_per_seq_gc(&mut w, metrics)?;
+            write_per_seq_n(&mut w, metrics)?;
+            write_adapter_content_long(&mut w, metrics)?;
         }
     }
 
     Ok(())
 }
 
-fn write_basic(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-    file_name: &str,
-) -> Result<()> {
+fn write_basic(w: &mut dyn Write, metrics: &FinalMetrics, file_name: &str) -> Result<()> {
     writeln!(
         w,
         ">>Basic Statistics\t{}",
@@ -71,10 +66,7 @@ fn write_basic(
     Ok(())
 }
 
-fn write_per_base_quality(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_per_base_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per base sequence quality\t{}",
@@ -101,10 +93,7 @@ fn write_per_base_quality(
     Ok(())
 }
 
-fn write_per_seq_quality(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_per_seq_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per sequence quality scores\t{}",
@@ -118,10 +107,7 @@ fn write_per_seq_quality(
     Ok(())
 }
 
-fn write_per_base_content(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_per_base_content(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per base sequence content\t{}",
@@ -139,7 +125,7 @@ fn write_per_base_content(
     Ok(())
 }
 
-fn write_per_seq_gc(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
+fn write_per_seq_gc(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per sequence GC content\t{}",
@@ -153,7 +139,7 @@ fn write_per_seq_gc(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetr
     Ok(())
 }
 
-fn write_per_base_n(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
+fn write_per_base_n(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per base N content\t{}",
@@ -167,7 +153,7 @@ fn write_per_base_n(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetr
     Ok(())
 }
 
-fn write_per_seq_n(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
+fn write_per_seq_n(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Per sequence N content\t{}",
@@ -181,10 +167,7 @@ fn write_per_seq_n(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetri
     Ok(())
 }
 
-fn write_length_dist_short(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_length_dist_short(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Sequence Length Distribution\t{}",
@@ -198,10 +181,7 @@ fn write_length_dist_short(
     Ok(())
 }
 
-fn write_length_dist_long(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_length_dist_long(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Sequence Length Distribution\t{}",
@@ -223,10 +203,7 @@ fn write_length_dist_long(
     Ok(())
 }
 
-fn write_duplication(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_duplication(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Sequence Duplication Levels\t{}",
@@ -240,7 +217,7 @@ fn write_duplication(
     Ok(())
 }
 
-fn write_overrep(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
+fn write_overrep(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Overrepresented sequences\t{}",
@@ -258,10 +235,7 @@ fn write_overrep(w: &mut dyn Write, metrics: &crate::core::metrics::FinalMetrics
     Ok(())
 }
 
-fn write_adapter_content_short(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_adapter_content_short(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Adapter Content\t{}",
@@ -283,10 +257,7 @@ fn write_adapter_content_short(
     Ok(())
 }
 
-fn write_adapter_content_long(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_adapter_content_long(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Adapter Content\t{}",
@@ -309,10 +280,7 @@ fn write_adapter_content_long(
 }
 
 #[cfg(not(feature = "no-kmer"))]
-fn write_kmer_content(
-    w: &mut dyn Write,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
+fn write_kmer_content(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     writeln!(
         w,
         ">>Kmer Content\t{}",

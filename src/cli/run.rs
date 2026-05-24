@@ -69,7 +69,6 @@ fn run(args: RunArgs) -> Result<()> {
 
     let config = RunConfig {
         reads1: args.reads1.clone(),
-        out_dir: out_dir.clone(),
         sample_name: sample_name.clone(),
         threads: args.threads,
         phred_offset,
@@ -89,12 +88,16 @@ fn run(args: RunArgs) -> Result<()> {
         );
     }
 
+    let t_finalize = Instant::now();
+    let metrics = output.agg.finalize(&output.ctx);
+    stage_done(stats, "finalize", t_finalize);
+
     let fastqc_path = out_dir.join("fastqc_data.txt");
     let summary_path = out_dir.join("summary.txt");
     let html_path = out_dir.join("fastqc_report.html");
 
     let t_fastqc = Instant::now();
-    report::fastqc_txt::write(&fastqc_path, &output)
+    report::fastqc_txt::write(&fastqc_path, &metrics, &output.ctx)
         .with_context(|| format!("failed to write {}", fastqc_path.display()))?;
     stage_done(stats, "fastqc_data", t_fastqc);
     if stats {
@@ -107,7 +110,7 @@ fn run(args: RunArgs) -> Result<()> {
     }
 
     let t_summary = Instant::now();
-    report::summary_txt::write(&summary_path, &output)
+    report::summary_txt::write(&summary_path, &metrics, &output.ctx)
         .with_context(|| format!("failed to write {}", summary_path.display()))?;
     stage_done(stats, "summary", t_summary);
     if stats {
@@ -120,7 +123,7 @@ fn run(args: RunArgs) -> Result<()> {
     }
 
     let t_html = Instant::now();
-    report::html::write(&html_path, &output)
+    report::html::write(&html_path, &metrics, &output.ctx)
         .with_context(|| format!("failed to write {}", html_path.display()))?;
     stage_done(stats, "html", t_html);
     if stats {
@@ -154,7 +157,7 @@ fn run(args: RunArgs) -> Result<()> {
             LatexExportArg::Summary => report::latex::LatexMode::Summary,
             LatexExportArg::Supplement => report::latex::LatexMode::Supplement,
         };
-        report::latex::write(&out_dir, &output, mode)
+        report::latex::write(&out_dir, &metrics, &output.ctx, mode)
             .with_context(|| "failed to write LaTeX export")?;
         stage_done(stats, "latex", t_latex);
     }

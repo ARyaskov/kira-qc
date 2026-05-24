@@ -1,10 +1,11 @@
-use crate::core::fastq::{self, OwnedRead};
+use crate::core::fastq::ReadView;
 use crate::core::metrics::{Agg, UpdateTimings};
 use crate::core::model::{Encoding, FinalizeContext, Mode};
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel as channel;
 use kira_fastq::FastqReader;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,6 @@ pub enum PhredOffsetConfig {
 
 pub struct RunConfig {
     pub reads1: PathBuf,
-    pub out_dir: PathBuf,
     pub sample_name: String,
     pub threads: usize,
     pub phred_offset: PhredOffsetConfig,
@@ -30,10 +30,16 @@ pub struct RunOutput {
     pub ctx: FinalizeContext,
 }
 
-struct WorkChunk {
-    index: usize,
-    reads: Vec<OwnedRead>,
-    bytes: usize,
+/// Packed buffer of records: `seq||qual` per record, indexed by `offsets`.
+struct PackedChunk {
+    bytes: Vec<u8>,
+    offsets: Vec<RecordOffset>,
+}
+
+#[derive(Clone, Copy)]
+struct RecordOffset {
+    seq_start: u32,
+    len: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -49,16 +55,8 @@ struct WorkerStats {
     chunks: u64,
     bytes: u64,
     reads: u64,
-    parse: Duration,
-    metrics_core: Duration,
-    adapters: Duration,
-    heavyhitters: Duration,
+    process: Duration,
     kmer: Duration,
-    kmer_encode: Duration,
-    kmer_keygen: Duration,
-    kmer_binning: Duration,
-    kmer_cms: Duration,
-    kmer_hh: Duration,
     kmer_updates: u64,
 }
 
@@ -84,276 +82,271 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
         .reads1
         .file_name()
         .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .context("failed to determine input filename")?;
 
     let ctx = FinalizeContext {
-        phred_offset,
         encoding,
         file_name,
         sample_name: cfg.sample_name.clone(),
         mode: cfg.mode,
     };
 
-    let (chunk_tx, chunk_rx) = channel::bounded::<WorkChunk>(cfg.threads * 2);
-    let (result_tx, result_rx) = channel::unbounded::<(usize, Agg)>();
-    let (total_tx, total_rx) = channel::bounded::<usize>(1);
+    let threads = cfg.threads.max(1);
+    let (chunk_tx, chunk_rx) = channel::bounded::<PackedChunk>(threads * 2);
+    let (result_tx, result_rx) = channel::bounded::<(Agg, WorkerStats)>(threads);
     let (err_tx, err_rx) = channel::bounded::<anyhow::Error>(1);
     let (prod_stats_tx, prod_stats_rx) = channel::bounded::<ProducerStats>(1);
-    let (worker_stats_tx, worker_stats_rx) = channel::unbounded::<WorkerStats>();
 
     let producer_path = cfg.reads1.clone();
     let producer_err = err_tx.clone();
     let t_producer = Instant::now();
     let producer = thread::spawn(move || {
-        let mut reader = match FastqReader::from_path_auto(&producer_path) {
-            Ok(reader) => reader,
-            Err(e) => {
-                let _ = producer_err.send(anyhow!("failed to open FASTQ input: {e:?}"));
-                return;
-            }
-        };
-
-        let mut stats = ProducerStats::default();
-        let mut chunk_index = 0usize;
-        let mut batch_reads = Vec::new();
-        let mut batch_bytes = 0usize;
-
-        loop {
-            let t_next = Instant::now();
-            let rec = match reader.next() {
-                Ok(Some(rec)) => rec,
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = producer_err.send(anyhow!("FASTQ parse/read error: {e:?}"));
-                    return;
-                }
-            };
-            stats.parse += t_next.elapsed();
-
-            let owned = fastq::OwnedRead::from_record(rec);
-            batch_bytes += owned.byte_len();
-            batch_reads.push(owned);
-
-            if batch_bytes >= TARGET_CHUNK_BYTES {
-                let read_count = batch_reads.len() as u64;
-                let chunk_bytes = batch_bytes as u64;
-                let chunk = WorkChunk {
-                    index: chunk_index,
-                    reads: std::mem::take(&mut batch_reads),
-                    bytes: batch_bytes,
-                };
-                if chunk_tx.send(chunk).is_err() {
-                    return;
-                }
-                stats.chunks += 1;
-                stats.reads += read_count;
-                stats.bytes += chunk_bytes;
-                batch_bytes = 0;
-                chunk_index += 1;
-            }
-        }
-
-        if !batch_reads.is_empty() {
-            let read_count = batch_reads.len() as u64;
-            let chunk_bytes = batch_bytes as u64;
-            let chunk = WorkChunk {
-                index: chunk_index,
-                reads: batch_reads,
-                bytes: batch_bytes,
-            };
-            if chunk_tx.send(chunk).is_err() {
-                return;
-            }
-            stats.chunks += 1;
-            stats.reads += read_count;
-            stats.bytes += chunk_bytes;
-            chunk_index += 1;
-        }
-
-        let _ = total_tx.send(chunk_index);
-        let _ = prod_stats_tx.send(stats);
+        run_producer(producer_path, chunk_tx, producer_err, prod_stats_tx);
     });
     log_stage(stats, "engine.spawn_producer", t_producer);
 
-    let mut workers = Vec::with_capacity(cfg.threads);
+    let mode = cfg.mode;
+    let stats_arc = Arc::new(stats);
+    let mut workers = Vec::with_capacity(threads);
     let t_workers = Instant::now();
-    for _ in 0..cfg.threads {
+    for _ in 0..threads {
         let rx = chunk_rx.clone();
         let tx = result_tx.clone();
-        let stats_enabled = stats;
-        let stats_tx = worker_stats_tx.clone();
-        let mode = cfg.mode;
+        let stats_enabled = *stats_arc;
         workers.push(thread::spawn(move || {
-            let mut wstats = WorkerStats::default();
-            for chunk in rx.iter() {
-                let mut agg = Agg::new(mode);
-                let t_parse = Instant::now();
-                for read in &chunk.reads {
-                    let read_view = read.as_view();
-                    if stats_enabled {
-                        let mut ut = UpdateTimings::default();
-                        agg.update_read_timed(&read_view, phred_offset, &mut ut);
-                        wstats.metrics_core += ut.metrics_core;
-                        wstats.adapters += ut.adapters;
-                        wstats.heavyhitters += ut.heavyhitters;
-                        wstats.kmer += ut.kmer;
-                        wstats.kmer_encode += ut.kmer_encode;
-                        wstats.kmer_keygen += ut.kmer_keygen;
-                        wstats.kmer_binning += ut.kmer_binning;
-                        wstats.kmer_cms += ut.kmer_cms;
-                        wstats.kmer_hh += ut.kmer_hh;
-                        wstats.kmer_updates += ut.kmer_updates;
-                    } else {
-                        agg.update_read(&read_view, phred_offset);
-                    }
-                }
-                wstats.parse += t_parse.elapsed();
-                wstats.chunks += 1;
-                wstats.bytes += chunk.bytes as u64;
-                wstats.reads += chunk.reads.len() as u64;
-
-                if tx.send((chunk.index, agg)).is_err() {
-                    break;
-                }
-            }
-
-            if stats_enabled {
-                let _ = stats_tx.send(wstats);
-            }
+            run_worker(rx, tx, mode, phred_offset, stats_enabled);
         }));
     }
-    log_stage(stats, "engine.spawn_workers", t_workers);
+    drop(chunk_rx);
     drop(result_tx);
     drop(err_tx);
-    drop(worker_stats_tx);
+    log_stage(stats, "engine.spawn_workers", t_workers);
 
     let t_collect = Instant::now();
-    let total_chunks = total_rx.recv().context("failed to receive chunk count")?;
-    if total_chunks == 0 {
-        return Err(anyhow!("input file is empty"));
-    }
-
-    let mut parts: Vec<Option<Agg>> = vec![None; total_chunks];
+    let mut final_agg = Agg::new(cfg.mode);
+    let mut worker_stats_total = WorkerStats::default();
     let mut wait_time = Duration::ZERO;
+    let mut merge_time = Duration::ZERO;
+
     let mut err_open = true;
-    for _ in 0..total_chunks {
-        if err_open {
-            let t_wait = Instant::now();
+    let mut results_open = true;
+    while results_open {
+        let t_wait = Instant::now();
+        let msg = if err_open {
             channel::select! {
-                recv(err_rx) -> err => {
-                    match err {
-                        Ok(err) => return Err(err),
-                        Err(_) => {
-                            err_open = false;
-                            continue;
-                        }
+                recv(err_rx) -> err => match err {
+                    Ok(err) => return Err(err),
+                    Err(_) => {
+                        err_open = false;
+                        continue;
                     }
-                }
-                recv(result_rx) -> msg => {
-                    wait_time += t_wait.elapsed();
-                    let (index, agg) = msg.context("failed to receive chunk result")?;
-                    if index >= parts.len() {
-                        return Err(anyhow!("invalid chunk index {}", index));
-                    }
-                    parts[index] = Some(agg);
-                }
+                },
+                recv(result_rx) -> msg => msg,
             }
         } else {
-            let t_wait = Instant::now();
-            let (index, agg) = result_rx.recv().context("failed to receive chunk result")?;
-            wait_time += t_wait.elapsed();
-            if index >= parts.len() {
-                return Err(anyhow!("invalid chunk index {}", index));
+            result_rx.recv()
+        };
+        wait_time += t_wait.elapsed();
+
+        match msg {
+            Ok((agg, ws)) => {
+                let tm = Instant::now();
+                final_agg.merge(&agg);
+                merge_time += tm.elapsed();
+                accumulate_worker_stats(&mut worker_stats_total, &ws);
             }
-            parts[index] = Some(agg);
+            Err(_) => {
+                results_open = false;
+            }
         }
     }
-
-    let mut final_agg = Agg::new(cfg.mode);
-    let t_merge = Instant::now();
-    for part in parts.into_iter().flatten() {
-        final_agg.merge(&part);
-    }
-    let merge_time = t_merge.elapsed();
-    log_stage(stats, "engine.merge", t_collect);
+    log_stage(stats, "engine.collect_merge", t_collect);
 
     let _ = producer.join();
-    for worker in workers {
-        let _ = worker.join();
+    for w in workers {
+        let _ = w.join();
     }
 
     let prod_stats = prod_stats_rx.recv().unwrap_or_default();
-    let mut worker_stats = WorkerStats::default();
-    for ws in worker_stats_rx.iter() {
-        worker_stats.chunks += ws.chunks;
-        worker_stats.bytes += ws.bytes;
-        worker_stats.reads += ws.reads;
-        worker_stats.parse += ws.parse;
-        worker_stats.metrics_core += ws.metrics_core;
-        worker_stats.adapters += ws.adapters;
-        worker_stats.heavyhitters += ws.heavyhitters;
-        worker_stats.kmer += ws.kmer;
-        worker_stats.kmer_encode += ws.kmer_encode;
-        worker_stats.kmer_keygen += ws.kmer_keygen;
-        worker_stats.kmer_binning += ws.kmer_binning;
-        worker_stats.kmer_cms += ws.kmer_cms;
-        worker_stats.kmer_hh += ws.kmer_hh;
-        worker_stats.kmer_updates += ws.kmer_updates;
-    }
 
     if stats {
-        if prod_stats.chunks > 0 {
-            let avg = prod_stats.bytes as f64 / prod_stats.chunks as f64;
-            eprintln!(
-                "KIRA_STATS producer.chunks={} producer.avg_chunk_bytes={:.0} producer.bytes={} producer.reads={}",
-                prod_stats.chunks, avg, prod_stats.bytes, prod_stats.reads
-            );
-        }
-        eprintln!(
-            "KIRA_STATS worker.chunks={} worker.bytes={} worker.reads={}",
-            worker_stats.chunks, worker_stats.bytes, worker_stats.reads
-        );
-        eprintln!(
-            "KIRA_STATS producer.fastq_read_parse={}",
-            fmt_dur(prod_stats.parse)
-        );
-        let worker_total = worker_stats.parse
-            + worker_stats.metrics_core
-            + worker_stats.adapters
-            + worker_stats.heavyhitters
-            + worker_stats.kmer;
-        eprintln!(
-            "KIRA_STATS worker.parse={} worker.metrics_core={} worker.adapters={} worker.heavyhitters={} worker.kmer={} worker.total={}",
-            fmt_dur(worker_stats.parse),
-            fmt_dur(worker_stats.metrics_core),
-            fmt_dur(worker_stats.adapters),
-            fmt_dur(worker_stats.heavyhitters),
-            fmt_dur(worker_stats.kmer),
-            fmt_dur(worker_total)
-        );
-        eprintln!(
-            "KIRA_STATS kmer.encode={} kmer.keygen={} kmer.binning={} kmer.cms={} kmer.hh={} kmer.updates={}",
-            fmt_dur(worker_stats.kmer_encode),
-            fmt_dur(worker_stats.kmer_keygen),
-            fmt_dur(worker_stats.kmer_binning),
-            fmt_dur(worker_stats.kmer_cms),
-            fmt_dur(worker_stats.kmer_hh),
-            worker_stats.kmer_updates
-        );
-        eprintln!(
-            "KIRA_STATS reducer.wait={} reducer.merge_cost={}",
-            fmt_dur(wait_time),
-            fmt_dur(merge_time)
-        );
+        emit_stats(&prod_stats, &worker_stats_total, wait_time, merge_time);
     }
-
     log_stage(stats, "engine.total", t_total);
 
     Ok(RunOutput {
         agg: final_agg,
         ctx,
     })
+}
+
+fn run_producer(
+    path: PathBuf,
+    chunk_tx: channel::Sender<PackedChunk>,
+    err_tx: channel::Sender<anyhow::Error>,
+    stats_tx: channel::Sender<ProducerStats>,
+) {
+    let mut reader = match FastqReader::from_path_auto(&path) {
+        Ok(reader) => reader,
+        Err(e) => {
+            let _ = err_tx.send(anyhow!("failed to open FASTQ input: {e:?}"));
+            return;
+        }
+    };
+
+    let mut stats = ProducerStats::default();
+    let mut current = PackedChunk {
+        bytes: Vec::with_capacity(TARGET_CHUNK_BYTES + 4096),
+        offsets: Vec::with_capacity(TARGET_CHUNK_BYTES / 128),
+    };
+
+    loop {
+        let t_next = Instant::now();
+        let rec = match reader.next() {
+            Ok(Some(rec)) => rec,
+            Ok(None) => break,
+            Err(e) => {
+                let _ = err_tx.send(anyhow!("FASTQ parse/read error: {e:?}"));
+                return;
+            }
+        };
+        stats.parse += t_next.elapsed();
+
+        let seq = rec.seq();
+        let qual = rec.qual();
+        if seq.len() != qual.len() {
+            let _ = err_tx.send(anyhow!(
+                "seq/qual length mismatch: seq={} qual={}",
+                seq.len(),
+                qual.len()
+            ));
+            return;
+        }
+        let len = seq.len();
+        let seq_start = current.bytes.len() as u32;
+        current.bytes.extend_from_slice(seq);
+        current.bytes.extend_from_slice(qual);
+        current.offsets.push(RecordOffset {
+            seq_start,
+            len: len as u32,
+        });
+
+        if current.bytes.len() >= TARGET_CHUNK_BYTES {
+            let read_count = current.offsets.len() as u64;
+            let chunk_bytes = current.bytes.len() as u64;
+            let chunk = std::mem::replace(
+                &mut current,
+                PackedChunk {
+                    bytes: Vec::with_capacity(TARGET_CHUNK_BYTES + 4096),
+                    offsets: Vec::with_capacity(TARGET_CHUNK_BYTES / 128),
+                },
+            );
+            if chunk_tx.send(chunk).is_err() {
+                return;
+            }
+            stats.chunks += 1;
+            stats.reads += read_count;
+            stats.bytes += chunk_bytes;
+        }
+    }
+
+    if !current.offsets.is_empty() {
+        stats.chunks += 1;
+        stats.reads += current.offsets.len() as u64;
+        stats.bytes += current.bytes.len() as u64;
+        let _ = chunk_tx.send(current);
+    }
+
+    let _ = stats_tx.send(stats);
+}
+
+fn run_worker(
+    rx: channel::Receiver<PackedChunk>,
+    tx: channel::Sender<(Agg, WorkerStats)>,
+    mode: Mode,
+    phred_offset: u8,
+    stats_enabled: bool,
+) {
+    let mut agg = Agg::new(mode);
+    let mut wstats = WorkerStats::default();
+
+    for chunk in rx.iter() {
+        let t_start = Instant::now();
+        wstats.chunks += 1;
+        wstats.bytes += chunk.bytes.len() as u64;
+        wstats.reads += chunk.offsets.len() as u64;
+
+        if stats_enabled {
+            let mut timing = UpdateTimings::default();
+            for off in &chunk.offsets {
+                let view = view_from_offset(&chunk, *off);
+                agg.update_read_timed(&view, phred_offset, &mut timing);
+            }
+            wstats.kmer += timing.kmer;
+            wstats.kmer_updates += timing.kmer_updates;
+        } else {
+            for off in &chunk.offsets {
+                let view = view_from_offset(&chunk, *off);
+                agg.update_read(&view, phred_offset);
+            }
+        }
+
+        wstats.process += t_start.elapsed();
+    }
+
+    let _ = tx.send((agg, wstats));
+}
+
+#[inline]
+fn view_from_offset(chunk: &PackedChunk, off: RecordOffset) -> ReadView<'_> {
+    let start = off.seq_start as usize;
+    let len = off.len as usize;
+    let seq = &chunk.bytes[start..start + len];
+    let qual = &chunk.bytes[start + len..start + 2 * len];
+    ReadView { seq, qual }
+}
+
+fn accumulate_worker_stats(total: &mut WorkerStats, ws: &WorkerStats) {
+    total.chunks += ws.chunks;
+    total.bytes += ws.bytes;
+    total.reads += ws.reads;
+    total.process += ws.process;
+    total.kmer += ws.kmer;
+    total.kmer_updates += ws.kmer_updates;
+}
+
+fn emit_stats(
+    prod: &ProducerStats,
+    workers: &WorkerStats,
+    wait_time: Duration,
+    merge_time: Duration,
+) {
+    if prod.chunks > 0 {
+        let avg = prod.bytes as f64 / prod.chunks as f64;
+        eprintln!(
+            "KIRA_STATS producer.chunks={} producer.avg_chunk_bytes={:.0} producer.bytes={} producer.reads={} producer.parse={}",
+            prod.chunks,
+            avg,
+            prod.bytes,
+            prod.reads,
+            fmt_dur(prod.parse),
+        );
+    }
+    eprintln!(
+        "KIRA_STATS worker.chunks={} worker.bytes={} worker.reads={} worker.process={} worker.kmer={} worker.kmer_updates={}",
+        workers.chunks,
+        workers.bytes,
+        workers.reads,
+        fmt_dur(workers.process),
+        fmt_dur(workers.kmer),
+        workers.kmer_updates,
+    );
+    eprintln!(
+        "KIRA_STATS reducer.wait={} reducer.merge_cost={}",
+        fmt_dur(wait_time),
+        fmt_dur(merge_time)
+    );
 }
 
 fn stats_enabled() -> bool {
@@ -390,8 +383,12 @@ fn detect_phred_offset(path: &PathBuf) -> Result<u8> {
         };
 
         for &b in rec.qual() {
-            min_q = min_q.min(b);
-            max_q = max_q.max(b);
+            if b < min_q {
+                min_q = b;
+            }
+            if b > max_q {
+                max_q = b;
+            }
         }
         reads += 1;
     }

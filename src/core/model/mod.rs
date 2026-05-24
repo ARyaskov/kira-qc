@@ -36,7 +36,6 @@ pub enum Encoding {
 }
 
 pub struct FinalizeContext {
-    pub phred_offset: u8,
     pub encoding: Encoding,
     pub file_name: String,
     pub sample_name: String,

@@ -1,5 +1,5 @@
-use crate::core::engine::RunOutput;
-use crate::core::model::{Mode, Status};
+use crate::core::metrics::FinalMetrics;
+use crate::core::model::{FinalizeContext, Mode, Status};
 use anyhow::{Context, Result};
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
@@ -7,209 +7,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn write_modern(path: &Path, output: &RunOutput) -> Result<()> {
-    let metrics = output.agg.finalize(&output.ctx);
-    let mut html = String::with_capacity(256 * 1024);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    writeln!(html, "<!DOCTYPE html>")?;
-    writeln!(html, "<html lang=\"en\">")?;
-    writeln!(html, "<head>")?;
-    writeln!(html, "<meta charset=\"utf-8\"/>")?;
-    writeln!(
-        html,
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
-    )?;
-    writeln!(
-        html,
-        "<title>kira-qc report: {}</title>",
-        output.ctx.sample_name
-    )?;
-    writeln!(html, "<style>")?;
-    writeln!(
-        html,
-        "body{{font-family:Arial,Helvetica,sans-serif;margin:20px;color:#222;background:#fff;}}"
-    )?;
-    writeln!(html, "h1{{margin:0 0 8px 0;font-size:24px;}}")?;
-    writeln!(html, "h2{{margin:24px 0 8px 0;font-size:20px;}}")?;
-    writeln!(
-        html,
-        ".meta{{color:#555;font-size:13px;margin-bottom:16px;}}"
-    )?;
-    writeln!(
-        html,
-        ".summary{{border-collapse:collapse;margin:12px 0 20px 0;width:100%;max-width:900px;}}"
-    )?;
-    writeln!(
-        html,
-        ".summary th,.summary td{{border:1px solid #ddd;padding:6px 10px;text-align:left;}}"
-    )?;
-    writeln!(html, ".pass{{color:#0a7a0a;font-weight:bold;}}")?;
-    writeln!(html, ".warn{{color:#d98200;font-weight:bold;}}")?;
-    writeln!(html, ".fail{{color:#c00000;font-weight:bold;}}")?;
-    writeln!(
-        html,
-        ".module{{border-top:1px solid #eee;padding-top:8px;}}"
-    )?;
-    writeln!(html, ".plot{{margin:8px 0 6px 0;}}")?;
-    writeln!(
-        html,
-        ".desc{{color:#444;font-size:13px;max-width:1000px;margin:4px 0 10px 0;}}"
-    )?;
-    writeln!(
-        html,
-        ".table{{border-collapse:collapse;width:100%;max-width:1000px;font-size:12px;}}"
-    )?;
-    writeln!(
-        html,
-        ".table th,.table td{{border:1px solid #ddd;padding:4px 6px;text-align:right;}}"
-    )?;
-    writeln!(
-        html,
-        ".table th:first-child,.table td:first-child{{text-align:left;}}"
-    )?;
-    writeln!(html, "details{{margin:6px 0 18px 0;}}")?;
-    writeln!(html, "svg{{background:#fafafa;border:1px solid #e5e5e5;}}")?;
-    writeln!(html, "</style>")?;
-    writeln!(html, "</head>")?;
-    writeln!(html, "<body>")?;
-
-    let mode_label = match output.ctx.mode {
-        Mode::Short => "Short-read (Illumina)",
-        Mode::Long => "Long-read (ONT / PacBio)",
-    };
-
-    writeln!(html, "<h1>kira-qc report</h1>")?;
-    writeln!(
-        html,
-        "<div class=\"meta\">Sample: <b>{}</b><br/>File: {}<br/>Mode: {}<br/>Timestamp: {} (unix: {})</div>",
-        output.ctx.sample_name,
-        output.ctx.file_name,
-        mode_label,
-        fmt_timestamp(ts),
-        ts
-    )?;
-
-    writeln!(html, "<h2>Summary</h2>")?;
-    writeln!(html, "<table class=\"summary\">")?;
-    writeln!(html, "<tr><th>Status</th><th>Module</th></tr>")?;
-    summary_row(&mut html, metrics.statuses.basic, "Basic Statistics")?;
-    match output.ctx.mode {
-        Mode::Short => {
-            summary_row(
-                &mut html,
-                metrics.statuses.per_base_qual,
-                "Per base sequence quality",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_seq_qual,
-                "Per sequence quality scores",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_base_content,
-                "Per base sequence content",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_seq_gc,
-                "Per sequence GC content",
-            )?;
-            summary_row(&mut html, metrics.statuses.per_base_n, "Per base N content")?;
-            summary_row(
-                &mut html,
-                metrics.statuses.length_dist,
-                "Sequence Length Distribution",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.duplication,
-                "Sequence Duplication Levels",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.overrepresented,
-                "Overrepresented sequences",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.adapter_content,
-                "Adapter Content",
-            )?;
-            #[cfg(not(feature = "no-kmer"))]
-            summary_row(&mut html, metrics.statuses.kmer_content, "Kmer Content")?;
-        }
-        Mode::Long => {
-            summary_row(
-                &mut html,
-                metrics.statuses.length_dist,
-                "Sequence Length Distribution",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_seq_qual,
-                "Per sequence quality scores",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_seq_gc,
-                "Per sequence GC content",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.per_seq_n,
-                "Per sequence N content",
-            )?;
-            summary_row(
-                &mut html,
-                metrics.statuses.adapter_content,
-                "Adapter Content",
-            )?;
-        }
-    }
-    writeln!(html, "</table>")?;
-
-    module_basic_stats(&mut html, &metrics, &output.ctx.file_name)?;
-    match output.ctx.mode {
-        Mode::Short => {
-            module_per_base_quality(&mut html, &metrics)?;
-            module_per_seq_quality(&mut html, &metrics)?;
-            module_per_base_content(&mut html, &metrics)?;
-            module_per_seq_gc(&mut html, &metrics)?;
-            module_per_base_n(&mut html, &metrics)?;
-            module_length_dist_short(&mut html, &metrics)?;
-            module_duplication(&mut html, &metrics)?;
-            module_overrep(&mut html, &metrics)?;
-            module_adapter_content_short(&mut html, &metrics)?;
-            #[cfg(not(feature = "no-kmer"))]
-            module_kmer_content(&mut html, &metrics)?;
-        }
-        Mode::Long => {
-            module_length_dist_long(&mut html, &metrics)?;
-            module_per_seq_quality(&mut html, &metrics)?;
-            module_per_seq_gc(&mut html, &metrics)?;
-            module_per_seq_n(&mut html, &metrics)?;
-            module_adapter_content_long(&mut html, &metrics)?;
-        }
-    }
-
-    html.push_str("<script>");
-    html.push_str(r#"document.querySelectorAll('table.sortable').forEach(t=>{const h=t.querySelectorAll('th');h.forEach((th,i)=>{th.style.cursor='pointer';th.addEventListener('click',()=>{const rows=[...t.querySelectorAll('tr')].slice(1);const asc=th.getAttribute('data-asc')!=='true';rows.sort((a,b)=>{const av=a.children[i].innerText;const bv=b.children[i].innerText;const an=parseFloat(av);const bn=parseFloat(bv);if(!isNaN(an)&&!isNaN(bn)){return asc?an-bn:bn-an;}return asc?av.localeCompare(bv):bv.localeCompare(av);});th.setAttribute('data-asc',asc);rows.forEach(r=>t.appendChild(r));});});});"#);
-    html.push_str("</script>");
-    writeln!(html, "</body></html>")?;
-
-    let mut w =
-        BufWriter::new(File::create(path).with_context(|| "create fastqc_report.html failed")?);
-    w.write_all(html.as_bytes())?;
-    Ok(())
-}
-
-pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
-    let metrics = output.agg.finalize(&output.ctx);
+pub fn write(path: &Path, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
     let mut html = String::with_capacity(256 * 1024);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -227,7 +25,7 @@ pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
     writeln!(
         html,
         "<title>FastQC-compatible report: {}</title>",
-        output.ctx.sample_name
+        ctx.sample_name
     )?;
     writeln!(html, "<style>")?;
     writeln!(
@@ -312,7 +110,7 @@ pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
     writeln!(html, "</head>")?;
     writeln!(html, "<body>")?;
 
-    let mode_label = match output.ctx.mode {
+    let mode_label = match ctx.mode {
         Mode::Short => "Short-read (Illumina)",
         Mode::Long => "Long-read (ONT / PacBio)",
     };
@@ -327,7 +125,7 @@ pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
         "Basic Statistics",
         module_id_basic(),
     )?;
-    match output.ctx.mode {
+    match ctx.mode {
         Mode::Short => {
             sidebar_item(
                 &mut html,
@@ -432,33 +230,33 @@ pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
     writeln!(
         html,
         "<div class=\"meta\">File: {}<br/>Mode: {}<br/>Timestamp: {} (unix: {})</div>",
-        output.ctx.file_name,
+        ctx.file_name,
         mode_label,
         fmt_timestamp(ts),
         ts
     )?;
 
-    compat_basic_stats(&mut html, &metrics, &output.ctx.file_name)?;
-    match output.ctx.mode {
+    compat_basic_stats(&mut html, metrics, &ctx.file_name)?;
+    match ctx.mode {
         Mode::Short => {
-            compat_per_base_quality(&mut html, &metrics)?;
-            compat_per_seq_quality(&mut html, &metrics)?;
-            compat_per_base_content(&mut html, &metrics)?;
-            compat_per_seq_gc(&mut html, &metrics)?;
-            compat_per_base_n(&mut html, &metrics)?;
-            compat_length_dist_short(&mut html, &metrics)?;
-            compat_duplication(&mut html, &metrics)?;
-            compat_overrep(&mut html, &metrics)?;
-            compat_adapter_content_short(&mut html, &metrics)?;
+            compat_per_base_quality(&mut html, metrics)?;
+            compat_per_seq_quality(&mut html, metrics)?;
+            compat_per_base_content(&mut html, metrics)?;
+            compat_per_seq_gc(&mut html, metrics)?;
+            compat_per_base_n(&mut html, metrics)?;
+            compat_length_dist_short(&mut html, metrics)?;
+            compat_duplication(&mut html, metrics)?;
+            compat_overrep(&mut html, metrics)?;
+            compat_adapter_content_short(&mut html, metrics)?;
             #[cfg(not(feature = "no-kmer"))]
-            compat_kmer_content(&mut html, &metrics)?;
+            compat_kmer_content(&mut html, metrics)?;
         }
         Mode::Long => {
-            compat_length_dist_long(&mut html, &metrics)?;
-            compat_per_seq_quality(&mut html, &metrics)?;
-            compat_per_seq_gc(&mut html, &metrics)?;
-            compat_per_seq_n(&mut html, &metrics)?;
-            compat_adapter_content_long(&mut html, &metrics)?;
+            compat_length_dist_long(&mut html, metrics)?;
+            compat_per_seq_quality(&mut html, metrics)?;
+            compat_per_seq_gc(&mut html, metrics)?;
+            compat_per_seq_n(&mut html, metrics)?;
+            compat_adapter_content_long(&mut html, metrics)?;
         }
     }
 
@@ -473,41 +271,9 @@ pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
     Ok(())
 }
 
-fn summary_row(out: &mut String, status: Status, name: &str) -> Result<()> {
-    let class = status_class(status);
-    writeln!(
-        out,
-        "<tr><td class=\"{}\">{}</td><td>{}</td></tr>",
-        class,
-        status.as_str_upper(),
-        name
-    )?;
-    Ok(())
-}
-
-fn module_header(out: &mut String, status: Status, title: &str) -> Result<()> {
-    let class = status_class(status);
-    writeln!(out, "<div class=\"module\">")?;
-    writeln!(out, "<h2 class=\"{}\">{}</h2>", class, title)?;
-    Ok(())
-}
-
 fn module_desc(out: &mut String, text: &str) -> Result<()> {
     writeln!(out, "<p class=\"desc\">{}</p>", text)?;
     Ok(())
-}
-
-fn module_footer(out: &mut String) -> Result<()> {
-    writeln!(out, "</div>")?;
-    Ok(())
-}
-
-fn status_class(status: Status) -> &'static str {
-    match status {
-        Status::Pass => "pass",
-        Status::Warn => "warn",
-        Status::Fail => "fail",
-    }
 }
 
 fn status_icon_svg(status: Status, size: u32) -> String {
@@ -1023,389 +789,6 @@ fn compat_kmer_content(
     compat_section_footer(out)
 }
 
-fn module_basic_stats(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-    file: &str,
-) -> Result<()> {
-    module_header(out, metrics.statuses.basic, "Basic Statistics")?;
-    module_desc(
-        out,
-        "Summary of input size, read counts, length range, and GC%. Large length ranges or unusual GC can indicate mixed libraries or contamination.",
-    )?;
-    writeln!(out, "<table class=\"table\">")?;
-    writeln!(out, "<tr><th>Measure</th><th>Value</th></tr>")?;
-    writeln!(out, "<tr><td>Filename</td><td>{}</td></tr>", file)?;
-    writeln!(
-        out,
-        "<tr><td>File type</td><td>{}</td></tr>",
-        metrics.basic.file_type
-    )?;
-    writeln!(
-        out,
-        "<tr><td>Encoding</td><td>{}</td></tr>",
-        metrics.basic.encoding
-    )?;
-    writeln!(
-        out,
-        "<tr><td>Total Sequences</td><td>{}</td></tr>",
-        fmt_int(metrics.basic.total_sequences)
-    )?;
-    writeln!(
-        out,
-        "<tr><td>Filtered Sequences</td><td>{}</td></tr>",
-        fmt_int(metrics.basic.filtered_sequences)
-    )?;
-    if metrics.basic.min_len == metrics.basic.max_len {
-        writeln!(
-            out,
-            "<tr><td>Sequence length</td><td>{}</td></tr>",
-            metrics.basic.min_len
-        )?;
-    } else {
-        writeln!(
-            out,
-            "<tr><td>Sequence length</td><td>{}-{}</td></tr>",
-            metrics.basic.min_len, metrics.basic.max_len
-        )?;
-    }
-    writeln!(
-        out,
-        "<tr><td>%GC</td><td>{}</td></tr>",
-        metrics.basic.gc_percent
-    )?;
-    writeln!(out, "</table>")?;
-    module_footer(out)
-}
-
-fn module_per_base_quality(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.per_base_qual,
-        "Per base sequence quality",
-    )?;
-    module_desc(
-        out,
-        "Shows quality score distributions at each base position. Systematic drops toward read ends often reflect sequencing degradation or adapter read-through.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    let max_q = metrics
-        .per_base_qual
-        .iter()
-        .map(|r| r.p90 as f64)
-        .fold(40.0, f64::max);
-    svg_boxplot(
-        out,
-        &metrics.per_base_qual,
-        w,
-        h,
-        max_q,
-        "Position",
-        "Quality",
-    )?;
-    table_per_base_quality(out, &metrics.per_base_qual)?;
-    module_footer(out)
-}
-
-fn module_per_seq_quality(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.per_seq_qual,
-        "Per sequence quality scores",
-    )?;
-    module_desc(
-        out,
-        "Shows the distribution of mean quality per read. A left-shifted distribution indicates overall low-quality reads or mixed data.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    let data = metrics
-        .per_seq_qual
-        .iter()
-        .map(|r| (r.mean_q as f64, r.count as f64))
-        .collect::<Vec<_>>();
-    svg_histogram_xbands(
-        out,
-        data.as_slice(),
-        w,
-        h,
-        0.0,
-        0.0,
-        &[
-            (0.0, 20.0, "#f4c7c3"),
-            (20.0, 28.0, "#ffe5b4"),
-            (28.0, 60.0, "#cdeccf"),
-        ],
-        "Mean Q",
-        "Count",
-    )?;
-    table_per_seq_quality(out, &metrics.per_seq_qual)?;
-    module_footer(out)
-}
-
-fn module_per_base_content(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.per_base_content,
-        "Per base sequence content",
-    )?;
-    module_desc(
-        out,
-        "Shows the percentage of each base at each position. Strong positional biases can indicate priming artifacts or residual adapters.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    legend_base_content(out)?;
-    svg_multi_line(out, &metrics.per_base_content, w, h, "Position", "%")?;
-    table_per_base_content(out, &metrics.per_base_content)?;
-    module_footer(out)
-}
-
-fn module_per_seq_gc(out: &mut String, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
-    module_header(out, metrics.statuses.per_seq_gc, "Per sequence GC content")?;
-    module_desc(
-        out,
-        "Shows the distribution of GC% across reads. Broad or multi-modal shapes can indicate contamination or mixed libraries.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    let data = metrics
-        .per_seq_gc
-        .iter()
-        .map(|r| (r.gc as f64, r.count as f64))
-        .collect::<Vec<_>>();
-    svg_histogram_xbands(
-        out,
-        data.as_slice(),
-        w,
-        h,
-        0.0,
-        100.0,
-        &[(40.0, 60.0, "#cdeccf")],
-        "GC%",
-        "Count",
-    )?;
-    table_per_seq_gc(out, &metrics.per_seq_gc)?;
-    module_footer(out)
-}
-
-fn module_per_base_n(out: &mut String, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
-    module_header(out, metrics.statuses.per_base_n, "Per base N content")?;
-    module_desc(
-        out,
-        "Shows the proportion of Ns at each position. Spikes or elevated Ns suggest base-calling issues or low-complexity regions.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    let data = metrics
-        .per_base_n
-        .iter()
-        .map(|r| (r.base as f64, r.n_percent))
-        .collect::<Vec<_>>();
-    let (y_min, y_max) = auto_range(data.iter().map(|(_, y)| *y), 0.0, 100.0);
-    svg_single_line_ybands(
-        out,
-        data.as_slice(),
-        w,
-        h,
-        y_min,
-        y_max,
-        "#555",
-        &[
-            (0.0, 5.0, "#cdeccf"),
-            (5.0, 20.0, "#ffe5b4"),
-            (20.0, 100.0, "#f4c7c3"),
-        ],
-        "Position",
-        "% N",
-    )?;
-    table_per_base_n(out, &metrics.per_base_n)?;
-    module_footer(out)
-}
-
-fn module_per_seq_n(out: &mut String, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
-    module_header(out, metrics.statuses.per_seq_n, "Per sequence N content")?;
-    module_desc(
-        out,
-        "Shows the distribution of N% per read. Excess high-N reads indicate poor base-calling or low-quality segments.",
-    )?;
-    let data = metrics
-        .per_seq_n
-        .iter()
-        .map(|r| (r.n_percent as f64, r.count as f64))
-        .collect::<Vec<_>>();
-    svg_histogram_xbands(
-        out,
-        data.as_slice(),
-        800.0,
-        260.0,
-        0.0,
-        100.0,
-        &[
-            (0.0, 10.0, "#cdeccf"),
-            (10.0, 20.0, "#ffe5b4"),
-            (20.0, 100.0, "#f4c7c3"),
-        ],
-        "N%",
-        "Count",
-    )?;
-    table_per_seq_n(out, &metrics.per_seq_n)?;
-    module_footer(out)
-}
-
-fn module_length_dist_short(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.length_dist,
-        "Sequence Length Distribution",
-    )?;
-    module_desc(
-        out,
-        "Shows read length frequencies. Multiple peaks or long tails may indicate trimming or mixed read sources.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    let data = metrics
-        .length_dist
-        .iter()
-        .map(|r| (r.length as f64, r.count as f64))
-        .collect::<Vec<_>>();
-    svg_histogram(out, data.as_slice(), w, h, 0.0, 0.0, "Length", "Count")?;
-    table_length_dist(out, &metrics.length_dist)?;
-    module_footer(out)
-}
-
-fn module_length_dist_long(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.length_dist,
-        "Sequence Length Distribution",
-    )?;
-    module_desc(
-        out,
-        "Shows read length frequencies using log-scaled bins. Very long tails or multiple modes may indicate mixed input or variable trimming.",
-    )?;
-    if let Some(ref ll) = metrics.long_length {
-        let data = ll
-            .bins
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (i as f64 + 1.0, c as f64))
-            .collect::<Vec<_>>();
-        svg_histogram(
-            out,
-            data.as_slice(),
-            800.0,
-            260.0,
-            0.0,
-            0.0,
-            "Length bin",
-            "Count",
-        )?;
-        table_long_length(out, ll)?;
-    }
-    module_footer(out)
-}
-
-fn module_duplication(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.duplication,
-        "Sequence Duplication Levels",
-    )?;
-    module_desc(
-        out,
-        "Estimates duplication using a streaming heavy-hitter model. High duplication often indicates PCR over-amplification or low library complexity.",
-    )?;
-    let data = metrics
-        .duplication
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (i as f64 + 1.0, r.relative))
-        .collect::<Vec<_>>();
-    svg_histogram(
-        out,
-        data.as_slice(),
-        800.0,
-        260.0,
-        0.0,
-        0.0,
-        "Level",
-        "Relative count",
-    )?;
-    table_duplication(out, &metrics.duplication)?;
-    module_footer(out)
-}
-
-fn module_overrep(out: &mut String, metrics: &crate::core::metrics::FinalMetrics) -> Result<()> {
-    module_header(
-        out,
-        metrics.statuses.overrepresented,
-        "Overrepresented sequences",
-    )?;
-    module_desc(
-        out,
-        "Lists sequences occurring more often than expected. Common sources are adapters, primers, or contamination.",
-    )?;
-    table_overrep(out, &metrics.overrepresented)?;
-    module_footer(out)
-}
-
-fn module_adapter_content_short(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(out, metrics.statuses.adapter_content, "Adapter Content")?;
-    module_desc(
-        out,
-        "Shows adapter match percentages by position. Increasing signal toward read ends suggests adapter read-through.",
-    )?;
-    let (w, h) = (800.0, 260.0);
-    svg_adapter_lines(out, &metrics.adapter_content, w, h, "Position", "%")?;
-    table_adapter_content(out, &metrics.adapter_content)?;
-    module_footer(out)
-}
-
-fn module_adapter_content_long(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(out, metrics.statuses.adapter_content, "Adapter Content")?;
-    module_desc(
-        out,
-        "Reports the fraction of reads containing common adapter motifs. Elevated percentages suggest residual adapters or chimeric reads.",
-    )?;
-    table_adapter_summary(out, &metrics.adapter_content)?;
-    module_footer(out)
-}
-
-#[cfg(not(feature = "no-kmer"))]
-fn module_kmer_content(
-    out: &mut String,
-    metrics: &crate::core::metrics::FinalMetrics,
-) -> Result<()> {
-    module_header(out, metrics.statuses.kmer_content, "Kmer Content")?;
-    module_desc(
-        out,
-        "Reports k-mers enriched at specific positions. Strong enrichment can indicate adapters or sequence bias.",
-    )?;
-    table_kmer(out, &metrics.kmer_rows)?;
-    module_footer(out)
-}
-
 fn svg_boxplot(
     out: &mut String,
     rows: &[crate::core::metrics::PerBaseQualRow],
@@ -1432,7 +815,6 @@ fn svg_boxplot(
         "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\" stroke=\"#ddd\"/>",
         left, top, plot_w, plot_h
     )?;
-    // Background quality bands (FastQC-like).
     draw_y_bands(
         out,
         left,
@@ -1481,7 +863,6 @@ fn svg_boxplot(
             (y_lq - y_uq).max(0.0),
             color
         )?;
-        // Whiskers (10th-90th) and median line.
         writeln!(
             out,
             "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#555\" stroke-width=\"1\"/>",
@@ -1511,71 +892,6 @@ fn svg_boxplot(
             y_m,
             box_x + box_w,
             y_m
-        )?;
-    }
-    writeln!(out, "</svg></div>")?;
-    Ok(())
-}
-
-fn svg_histogram(
-    out: &mut String,
-    data: &[(f64, f64)],
-    w: f64,
-    h: f64,
-    min_x: f64,
-    max_x: f64,
-    x_label: &str,
-    y_label: &str,
-) -> Result<()> {
-    writeln!(out, "<div class=\"plot\">")?;
-    writeln!(
-        out,
-        "<svg width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
-        w, h, w, h
-    )?;
-    let left = 50.0;
-    let right = 20.0;
-    let top = 12.0;
-    let bottom = 34.0;
-    let plot_w = w - left - right;
-    let plot_h = h - top - bottom;
-    writeln!(
-        out,
-        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\" stroke=\"#ddd\"/>",
-        left, top, plot_w, plot_h
-    )?;
-    let max_y = data.iter().map(|(_, y)| *y).fold(0.0, f64::max);
-    let (x_min, x_max) = if min_x == max_x {
-        let min_b = data.first().map(|d| d.0).unwrap_or(0.0);
-        let max_b = data.last().map(|d| d.0).unwrap_or(1.0);
-        auto_range(data.iter().map(|(x, _)| *x), min_b, max_b)
-    } else {
-        (min_x, max_x)
-    };
-    let bar_w = if data.is_empty() {
-        1.0
-    } else {
-        plot_w / data.len() as f64
-    };
-    draw_y_axis_ticks(out, left, top, plot_w, plot_h, 0.0, max_y, 4)?;
-    draw_y_axis_ticks_right(out, left, top, plot_w, plot_h, 0.0, max_y, 4)?;
-    draw_x_axis_ticks(out, left, top, plot_w, plot_h, x_min, x_max, 5)?;
-    draw_axis_labels(out, left, top, plot_w, plot_h, x_label, y_label)?;
-    for (i, (_xv, yv)) in data.iter().enumerate() {
-        let x = left + (i as f64) * bar_w;
-        let y = if max_y == 0.0 {
-            0.0
-        } else {
-            yv / max_y * plot_h
-        };
-        let y0 = top + plot_h - y;
-        writeln!(
-            out,
-            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#7db8da\"/>",
-            x,
-            y0,
-            bar_w.max(1.0),
-            y
         )?;
     }
     writeln!(out, "</svg></div>")?;
@@ -1777,7 +1093,6 @@ fn svg_multi_line(
     draw_y_axis_ticks_right(out, left, top, plot_w, plot_h, y_min, y_max, 5)?;
     draw_x_axis_ticks(out, left, top, plot_w, plot_h, 1.0, rows.len() as f64, 5)?;
     draw_axis_labels(out, left, top, plot_w, plot_h, x_label, y_label)?;
-    // FastQC line colours (Tol scheme): #882255, #332288, #117733, #DDCC77
     svg_line(
         out, &data_g, left, top, plot_w, plot_h, y_min, y_max, "#882255",
     )?;
@@ -1790,45 +1105,6 @@ fn svg_multi_line(
     svg_line(
         out, &data_c, left, top, plot_w, plot_h, y_min, y_max, "#DDCC77",
     )?;
-    writeln!(out, "</svg></div>")?;
-    Ok(())
-}
-
-fn svg_single_line(
-    out: &mut String,
-    data: &[(f64, f64)],
-    w: f64,
-    h: f64,
-    min_y: f64,
-    max_y: f64,
-    color: &str,
-    x_label: &str,
-    y_label: &str,
-) -> Result<()> {
-    writeln!(out, "<div class=\"plot\">")?;
-    writeln!(
-        out,
-        "<svg width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
-        w, h, w, h
-    )?;
-    let left = 50.0;
-    let right = 20.0;
-    let top = 12.0;
-    let bottom = 34.0;
-    let plot_w = w - left - right;
-    let plot_h = h - top - bottom;
-    writeln!(
-        out,
-        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#fff\" stroke=\"#ddd\"/>",
-        left, top, plot_w, plot_h
-    )?;
-    draw_y_axis_ticks(out, left, top, plot_w, plot_h, min_y, max_y, 5)?;
-    draw_y_axis_ticks_right(out, left, top, plot_w, plot_h, min_y, max_y, 5)?;
-    let x_min = data.first().map(|d| d.0).unwrap_or(0.0);
-    let x_max = data.last().map(|d| d.0).unwrap_or(1.0);
-    draw_x_axis_ticks(out, left, top, plot_w, plot_h, x_min, x_max, 5)?;
-    draw_axis_labels(out, left, top, plot_w, plot_h, x_label, y_label)?;
-    svg_line(out, data, left, top, plot_w, plot_h, min_y, max_y, color)?;
     writeln!(out, "</svg></div>")?;
     Ok(())
 }
@@ -2071,7 +1347,7 @@ fn fmt_int(v: u64) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     let len = s.len();
     for (i, ch) in s.chars().enumerate() {
-        if i != 0 && (len - i) % 3 == 0 {
+        if i != 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -2768,8 +2044,8 @@ fn svg_adapter_lines(
     )?;
     let mut series: Vec<Vec<(f64, f64)>> = vec![Vec::new(); crate::core::metrics::ADAPTERS.len()];
     for r in rows {
-        for i in 0..series.len() {
-            series[i].push((r.position as f64, r.values[i]));
+        for (i, s) in series.iter_mut().enumerate() {
+            s.push((r.position as f64, r.values[i]));
         }
     }
     let (y_min, y_max) = auto_range(

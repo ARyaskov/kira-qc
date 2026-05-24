@@ -1,7 +1,7 @@
 [package]
 name = "kira-qc"
 description = "FastQC-compatible QC tool written in Rust"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -25,10 +25,23 @@ categories = [
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
-kira-fastq = "0.1.0"
+kira-fastq = "0.2"
 zip = "7.2.0"
 aho-corasick = "1"
 svg2pdf = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rustc-hash = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
+[lints.clippy]
+# The SVG plotter helpers in `report::html` legitimately take many positional
+# parameters (out, data, width, height, multiple axis bounds, labels, …).
+# Refactoring them into builder structs would obscure call sites without any
+# functional benefit, so we suppress this lint at crate scope.
+too_many_arguments = "allow"
 
 [features]
 default = []

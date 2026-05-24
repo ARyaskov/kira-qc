@@ -1,134 +1,82 @@
-use crate::core::engine::RunOutput;
-use crate::core::model::Mode;
+use crate::core::metrics::FinalMetrics;
+use crate::core::model::{FinalizeContext, Mode, Status};
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-pub fn write(path: &Path, output: &RunOutput) -> Result<()> {
-    let metrics = output.agg.finalize(&output.ctx);
+pub fn write(path: &Path, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
     let mut w = BufWriter::new(File::create(path).with_context(|| "create summary.txt failed")?);
 
-    let file = &output.ctx.file_name;
+    let file = &ctx.file_name;
 
-    writeln!(
-        w,
-        "{}\t{}\t{}",
-        metrics.statuses.basic.as_str_upper(),
-        "Basic Statistics",
-        file
-    )?;
+    let line = |w: &mut BufWriter<File>, status: Status, name: &str| -> Result<()> {
+        writeln!(w, "{}\t{}\t{}", status.as_str_upper(), name, file)?;
+        Ok(())
+    };
 
-    match output.ctx.mode {
+    line(&mut w, metrics.statuses.basic, "Basic Statistics")?;
+
+    match ctx.mode {
         Mode::Short => {
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_base_qual.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_base_qual,
                 "Per base sequence quality",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_seq_qual.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_seq_qual,
                 "Per sequence quality scores",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_base_content.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_base_content,
                 "Per base sequence content",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_seq_gc.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_seq_gc,
                 "Per sequence GC content",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_base_n.as_str_upper(),
-                "Per base N content",
-                file
-            )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.length_dist.as_str_upper(),
+            line(&mut w, metrics.statuses.per_base_n, "Per base N content")?;
+            line(
+                &mut w,
+                metrics.statuses.length_dist,
                 "Sequence Length Distribution",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.duplication.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.duplication,
                 "Sequence Duplication Levels",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.overrepresented.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.overrepresented,
                 "Overrepresented sequences",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.adapter_content.as_str_upper(),
-                "Adapter Content",
-                file
-            )?;
+            line(&mut w, metrics.statuses.adapter_content, "Adapter Content")?;
             #[cfg(not(feature = "no-kmer"))]
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.kmer_content.as_str_upper(),
-                "Kmer Content",
-                file
-            )?;
+            line(&mut w, metrics.statuses.kmer_content, "Kmer Content")?;
         }
         Mode::Long => {
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.length_dist.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.length_dist,
                 "Sequence Length Distribution",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_seq_qual.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_seq_qual,
                 "Per sequence quality scores",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_seq_gc.as_str_upper(),
+            line(
+                &mut w,
+                metrics.statuses.per_seq_gc,
                 "Per sequence GC content",
-                file
             )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.per_seq_n.as_str_upper(),
-                "Per sequence N content",
-                file
-            )?;
-            writeln!(
-                w,
-                "{}\t{}\t{}",
-                metrics.statuses.adapter_content.as_str_upper(),
-                "Adapter Content",
-                file
-            )?;
+            line(&mut w, metrics.statuses.per_seq_n, "Per sequence N content")?;
+            line(&mut w, metrics.statuses.adapter_content, "Adapter Content")?;
         }
     }
 

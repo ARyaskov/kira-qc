@@ -585,10 +585,11 @@ dependencies = [
 
 [[package]]
 name = "kira-fastq"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24ecfa59824fce73fbac67009ddf3d460a21c9d8ddc8754803f16a7868690f02"
+checksum = "61565e7f452e825c66ff60022faad75834bcdb9e548344deb89e77ebfec0d411"
 dependencies = [
+ "crc32fast",
  "memchr",
  "memmap2",
  "miniz_oxide 0.9.0",
@@ -596,14 +597,16 @@ dependencies = [
 
 [[package]]
 name = "kira-qc"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "clap",
  "crossbeam-channel",
  "kira-fastq",
+ "rustc-hash",
  "svg2pdf",
+ "xxhash-rust",
  "zip",
 ]
 
@@ -1353,6 +1356,12 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "zeroize"

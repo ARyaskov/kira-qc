@@ -1,5 +1,4 @@
-use crate::simd;
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::sync::OnceLock;
 
 pub const ADAPTERS: [&str; 5] = [
@@ -10,37 +9,43 @@ pub const ADAPTERS: [&str; 5] = [
     "CGCCTTGGCCGTACAGCAG",                // SOLiD Small RNA Adapter
 ];
 
-const PREFIXES: [&[u8]; 5] = [
-    b"AGATCGGA",
-    b"TGGAATTC",
-    b"GTTCAGAG",
-    b"CTGTCTCT",
-    b"CGCCTTGG",
-];
-
 pub fn adapter_matcher() -> &'static AhoCorasick {
     static AC: OnceLock<AhoCorasick> = OnceLock::new();
     AC.get_or_init(|| {
         AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
+            .match_kind(MatchKind::LeftmostFirst)
             .build(ADAPTERS)
             .expect("adapter automaton")
     })
 }
 
+/// FastQC semantics: credit every position from the first match of each adapter to read end.
 pub fn scan(seq: &[u8], counts: &mut [[u64; ADAPTERS.len()]]) {
     if seq.is_empty() {
         return;
     }
-    if !prefilter(seq) {
-        return;
-    }
     let ac = adapter_matcher();
+    let mut first_start: [Option<usize>; ADAPTERS.len()] = [None; ADAPTERS.len()];
+    let mut remaining = ADAPTERS.len();
     for mat in ac.find_iter(seq) {
-        let pos = mat.start();
-        if pos < counts.len() {
-            let idx = mat.pattern().as_usize();
-            counts[pos][idx] += 1;
+        let idx = mat.pattern().as_usize();
+        if first_start[idx].is_none() {
+            first_start[idx] = Some(mat.start());
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    let cap = counts.len().min(seq.len());
+    for (idx, start) in first_start.iter().enumerate() {
+        let Some(start) = *start else { continue };
+        if start >= cap {
+            continue;
+        }
+        for c in counts[start..cap].iter_mut() {
+            c[idx] += 1;
         }
     }
 }
@@ -49,23 +54,10 @@ pub fn scan_any(seq: &[u8], hits: &mut [bool; ADAPTERS.len()]) {
     if seq.is_empty() {
         return;
     }
-    if !prefilter(seq) {
-        return;
-    }
     let ac = adapter_matcher();
     for mat in ac.find_iter(seq) {
-        let idx = mat.pattern().as_usize();
-        hits[idx] = true;
+        hits[mat.pattern().as_usize()] = true;
     }
-}
-
-fn prefilter(seq: &[u8]) -> bool {
-    for p in PREFIXES {
-        if simd::prefix_scan(seq, p) {
-            return true;
-        }
-    }
-    false
 }
 
 #[derive(Clone, Debug)]
