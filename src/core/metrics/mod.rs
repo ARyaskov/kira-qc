@@ -128,8 +128,8 @@ pub struct Agg {
     pub per_seq_n_hist: [u64; 101],
     pub reads_n_gt10: u64,
     pub reads_n_gt20: u64,
-    /// Flat `positions * adapter_stride` matrix.
-    pub adapter_counts: Vec<u64>,
+    /// Flat matrix of interval boundaries, with one extra position for closing events.
+    adapter_deltas: Vec<i64>,
     pub adapter_stride: usize,
     pub adapter_reads_any: Vec<u64>,
     pub seq_tracker: SeqTracker,
@@ -183,7 +183,7 @@ impl Agg {
             per_seq_n_hist: [0u64; 101],
             reads_n_gt10: 0,
             reads_n_gt20: 0,
-            adapter_counts: Vec::new(),
+            adapter_deltas: Vec::new(),
             adapter_stride: stride,
             adapter_reads_any,
             seq_tracker: SeqTracker::new(),
@@ -305,12 +305,13 @@ impl Agg {
 
         let stride = self.adapter_stride;
         if stride != 0 {
-            if self.adapter_counts.len() < len * stride {
-                self.adapter_counts.resize(len * stride, 0);
+            let cells = (len + 1) * stride;
+            if self.adapter_deltas.len() < cells {
+                self.adapter_deltas.resize(cells, 0);
             }
             self.cfg
                 .adapters
-                .scan(read.seq, &mut self.adapter_counts, stride);
+                .scan_ranges(read.seq, &mut self.adapter_deltas, stride);
         }
 
         if self.cfg.seq_tracking_enabled && self.in_dup_window(read_index) {
@@ -434,10 +435,10 @@ impl Agg {
             Mode::Short => {
                 self.seq_tracker.merge(&other.seq_tracker);
                 self.per_tile.merge(&other.per_tile);
-                if self.adapter_counts.len() < other.adapter_counts.len() {
-                    self.adapter_counts.resize(other.adapter_counts.len(), 0);
+                if self.adapter_deltas.len() < other.adapter_deltas.len() {
+                    self.adapter_deltas.resize(other.adapter_deltas.len(), 0);
                 }
-                for (t, &s) in self.adapter_counts.iter_mut().zip(&other.adapter_counts) {
+                for (t, &s) in self.adapter_deltas.iter_mut().zip(&other.adapter_deltas) {
                     *t += s;
                 }
                 if self.cfg.kmer_enabled && !other.kmer_bins.is_empty() {
@@ -946,8 +947,21 @@ impl Agg {
         if stride == 0 {
             return (rows, Status::Pass);
         }
-        let positions_tracked = self.adapter_counts.len() / stride;
+        let positions_tracked = (self.adapter_deltas.len() / stride).saturating_sub(1);
         let reaching = self.reads_reaching(positions_tracked);
+
+        let mut running = [0i64; MAX_ADAPTERS];
+        let mut counts = Vec::with_capacity(positions_tracked * stride);
+        for deltas in self
+            .adapter_deltas
+            .chunks_exact(stride)
+            .take(positions_tracked)
+        {
+            for (total, delta) in running.iter_mut().zip(deltas) {
+                *total += delta;
+                counts.push(*total);
+            }
+        }
 
         for g in groups {
             let mut values = vec![0.0f64; stride];
@@ -963,7 +977,7 @@ impl Agg {
                     continue;
                 }
                 positions += 1;
-                let row = &self.adapter_counts[i * stride..(i + 1) * stride];
+                let row = &counts[i * stride..(i + 1) * stride];
                 for (v, &count) in values.iter_mut().zip(row) {
                     *v += count as f64 * 100.0 / denom as f64;
                 }

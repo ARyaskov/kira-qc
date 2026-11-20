@@ -217,6 +217,19 @@ impl AdapterSet {
         }
     }
 
+    /// Record only the boundaries of each contaminated interval.
+    pub(super) fn scan_ranges(&self, seq: &[u8], deltas: &mut [i64], stride: usize) {
+        let mut first_start = [None; MAX_ADAPTERS];
+        let starts = &mut first_start[..self.adapters.len()];
+        self.first_matches(seq, starts);
+        for (adapter, start) in starts.iter().enumerate() {
+            if let Some(start) = *start {
+                deltas[start * stride + adapter] += 1;
+                deltas[seq.len() * stride + adapter] -= 1;
+            }
+        }
+    }
+
     /// Presence-only scan for long reads, where per-position curves are meaningless.
     pub fn scan_any(&self, seq: &[u8], hits: &mut [bool]) {
         if seq.is_empty() {
@@ -365,6 +378,36 @@ mod tests {
         set.scan(&seq, &mut counts, stride);
         for pos in 0..seq.len() {
             assert_eq!(counts[pos * stride], 1);
+        }
+    }
+
+    #[test]
+    fn interval_boundaries_match_dense_counts_for_mixed_lengths() {
+        let set = short();
+        let stride = set.len();
+        let sequences: [&[u8]; 4] = [
+            b"AGATCGGAAGAGCTGTCTCTTATA",
+            b"CCAGATCGGAAGAG",
+            b"GGGGGGGGGGGGAC",
+            b"AAAAAAAAAAAA",
+        ];
+        let length = sequences.iter().map(|seq| seq.len()).max().unwrap();
+        let mut dense = vec![0; length * stride];
+        let mut deltas = vec![0; (length + 1) * stride];
+        for seq in sequences {
+            set.scan(seq, &mut dense, stride);
+            set.scan_ranges(seq, &mut deltas, stride);
+        }
+        let mut counts = vec![0; stride];
+        for (position, row) in deltas.chunks_exact(stride).enumerate() {
+            for (adapter, &delta) in row.iter().enumerate() {
+                counts[adapter] += delta;
+                if position < length {
+                    assert_eq!(counts[adapter] as u64, dense[position * stride + adapter]);
+                } else {
+                    assert_eq!(counts[adapter], 0);
+                }
+            }
         }
     }
 

@@ -786,7 +786,13 @@ fn ignored_expensive_modules_skip_collection_and_keep_other_metrics() {
     .unwrap();
     let baseline = run(config(&input, 2, Mode::Short)).unwrap();
     assert!(baseline.agg.per_tile.is_available());
-    assert!(!baseline.agg.adapter_counts.is_empty());
+    assert!(
+        !baseline
+            .agg
+            .finalize(&baseline.ctx)
+            .adapter_content
+            .is_empty()
+    );
     assert!(!baseline.agg.seq_tracker.is_empty());
 
     let mut cfg = config(&input, 2, Mode::Short);
@@ -796,7 +802,7 @@ fn ignored_expensive_modules_skip_collection_and_keep_other_metrics() {
     let ignored = cfg.ignored_modules.clone();
     let result = run(cfg).unwrap();
     assert!(!result.agg.per_tile.is_available());
-    assert!(result.agg.adapter_counts.is_empty());
+    assert!(result.agg.finalize(&result.ctx).adapter_content.is_empty());
     assert!(result.agg.seq_tracker.is_empty());
 
     let render = |agg: &kira_qc::core::metrics::Agg,
