@@ -66,3 +66,27 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - run: cargo build --all-targets
+
+  compatibility:
+    name: FastQC and MultiQC compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install reference tools
+        run: |
+          python -m pip install multiqc==1.33
+          curl --fail --location --silent --show-error https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip --output fastqc.zip
+          unzip -q fastqc.zip -d reference
+      - name: Compare reports and import archives
+        run: |
+          cargo build --locked
+          python tests/fastqc_compatibility.py target/debug/kira-qc reference/FastQC

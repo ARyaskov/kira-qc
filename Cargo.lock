@@ -446,6 +446,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossbeam-channel",
+ "flate2",
  "kira-fastq",
  "rustc-hash",
  "svg2pdf",

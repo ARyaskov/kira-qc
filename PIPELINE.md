@@ -114,7 +114,9 @@ run produced. Every interpolated string is escaped for its target format.
 
 Output is byte-identical across thread counts, including the ZIP bundle, which
 uses a fixed archive timestamp. `SOURCE_DATE_EPOCH` pins the report timestamp.
-A test compares full report hashes across 1, 2, 4 and 16 threads.
+A multi-chunk test compares the complete reports and ZIP bundles across 1, 2, 4
+and 16 threads. The compatibility job also compares selected metrics against
+FastQC 0.12.1 and imports its ZIP and the generated ZIPs with MultiQC 1.33.
 
 ## Performance considerations
 

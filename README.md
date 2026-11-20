@@ -181,8 +181,8 @@ kira-qc produces byte-identical output regardless of thread count. Every
 aggregate is order-independent, and the duplication window is a prefix of the
 file defined by global read index rather than by whichever worker saw a read.
 Set `SOURCE_DATE_EPOCH` to pin the report timestamp; the ZIP bundle already uses
-a fixed archive timestamp. This is covered by a test that compares full report
-hashes across 1, 2, 4 and 16 threads.
+a fixed archive timestamp. A multi-chunk CLI test compares the complete reports
+and ZIP bundles across 1, 2, 4 and 16 threads.
 
 ## Performance notes
 

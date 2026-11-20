@@ -62,27 +62,56 @@ fn render_data_txt(path: &Path, threads: usize, mode: Mode) -> String {
     String::from_utf8(buf).expect("utf-8 report")
 }
 
-/// The README promises identical output regardless of thread count. It only
-/// holds now that duplication and overrepresentation are counted exactly over a
-/// prefix of the file instead of sampled per worker.
 #[test]
 fn output_is_identical_across_thread_counts() {
-    let dir = scratch("determinism");
-    let path = dir.join("reads.fastq");
-    write_fastq(&path, 5_000, true);
-
-    let single = render_data_txt(&path, 1, Mode::Short);
-    for threads in [2usize, 4, 8] {
-        let other = render_data_txt(&path, threads, Mode::Short);
-        assert_eq!(
-            single, other,
-            "report differs between 1 and {threads} threads"
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reads.fastq");
+    // More than four 2 MiB chunks of packed sequence and quality.
+    write_fastq(&path, 45_000, true);
+    let artifacts = |threads: &str| {
+        let output = dir.path().join(threads);
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+            .args([
+                "--quiet",
+                "--json",
+                "--dup-window",
+                "20000",
+                "-t",
+                threads,
+                "-o",
+            ])
+            .env("SOURCE_DATE_EPOCH", "0")
+            .arg(&output)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        [
+            "reads_fastqc/fastqc_data.txt",
+            "reads_fastqc/summary.txt",
+            "reads_fastqc/fastqc_report.html",
+            "reads_fastqc/kira_qc.json",
+            "reads_fastqc.html",
+            "reads_fastqc.zip",
+        ]
+        .map(|name| std::fs::read(output.join(name)).unwrap())
+    };
+    let single = artifacts("1");
+    for threads in ["2", "4", "16"] {
+        let other = artifacts(threads);
+        assert!(
+            single == other,
+            "reports differ between 1 and {threads} threads"
         );
     }
 }
 
 #[test]
-fn report_is_multiqc_parseable() {
+fn fastqc_text_uses_the_expected_headers() {
     let dir = scratch("multiqc");
     let path = dir.join("reads.fastq");
     write_fastq(&path, 2_000, true);
@@ -304,16 +333,46 @@ fn grouped_quality_uses_per_cycle_statistics_and_coverage() {
 }
 
 #[test]
-fn gzip_input_is_read_once() {
-    // Auto-detection used to re-open (and re-inflate) the input. This only
-    // checks the functional side: a gzip file still analyses correctly.
-    let dir = scratch("gzip");
-    let plain = dir.join("reads.fastq");
-    write_fastq(&plain, 500, false);
+fn gzip_and_multi_block_bgzf_match_plain_fastq() {
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
 
-    let a = run(config(&plain, 2, Mode::Short)).expect("engine run");
-    assert_eq!(a.agg.total_reads, 500);
-    assert_eq!(a.ctx.encoding, Encoding::Sanger);
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn bgzf_block(bytes: &[u8]) -> Vec<u8> {
+        let gzip = gzip(bytes);
+        let mut block = gzip[..10].to_vec();
+        block[3] |= 4; // FEXTRA
+        block.extend_from_slice(&[6, 0, b'B', b'C', 2, 0]);
+        let size_minus_one = u16::try_from(gzip.len() + 8 - 1).unwrap();
+        block.extend_from_slice(&size_minus_one.to_le_bytes());
+        block.extend_from_slice(&gzip[10..]);
+        block
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("reads.fastq");
+    let gz = dir.path().join("reads.fastq.gz");
+    let bgzf = dir.path().join("reads.fastq.bgzf");
+    write_fastq(&plain, 1_000, true);
+    let bytes = std::fs::read(&plain).unwrap();
+    std::fs::write(&gz, gzip(&bytes)).unwrap();
+    let mut blocks: Vec<u8> = bytes.chunks(32_768).flat_map(bgzf_block).collect();
+    blocks.extend(bgzf_block(&[]));
+    std::fs::write(&bgzf, blocks).unwrap();
+    let normalized_report = |path: &Path| {
+        render_data_txt(path, 2, Mode::Short)
+            .lines()
+            .filter(|line| !line.starts_with("Filename\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(normalized_report(&gz), normalized_report(&plain));
+    assert_eq!(normalized_report(&bgzf), normalized_report(&plain));
 }
 
 #[test]
