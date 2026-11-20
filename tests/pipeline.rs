@@ -392,7 +392,15 @@ fn noextract_preserves_existing_reports_and_rejects_path_sample_names() {
     let archive = std::fs::File::open(root.path().join("reads_fastqc.zip")).unwrap();
     let mut archive = zip::ZipArchive::new(archive).unwrap();
     assert!(archive.by_name("reads_fastqc/fastqc_data.txt").is_ok());
-    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
+    let standalone = std::fs::read(root.path().join("reads_fastqc.html")).unwrap();
+    let mut bundled = Vec::new();
+    std::io::Read::read_to_end(
+        &mut archive.by_name("reads_fastqc/fastqc_report.html").unwrap(),
+        &mut bundled,
+    )
+    .unwrap();
+    assert_eq!(standalone, bundled);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4);
 
     let output = run_cli(&["--sample-name", "../other"]);
     assert!(!output.status.success());

@@ -257,6 +257,15 @@ fn run_one(
         log.stage("zip", t_zip);
     }
 
+    let standalone_html = out_root.join(format!("{sample_name}_fastqc.html"));
+    let mut html = fs::File::open(out_dir.join("fastqc_report.html"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&out_root)?;
+    std::io::copy(&mut html, temporary.as_file_mut())?;
+    drop(html);
+    temporary
+        .persist(&standalone_html)
+        .with_context(|| format!("failed to publish {}", standalone_html.display()))?;
+
     if let Some(temp_dir) = temp_dir {
         temp_dir
             .close()

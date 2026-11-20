@@ -112,7 +112,7 @@ kira-qc reads.fastq.gz -o qc/ --mode long
 | `-k`, `--kmers` | Enable the K-mer Content module | Off |
 | `--dup-window <N>` | Reads used for duplication estimates, 0 = all | 1000000 |
 | `--no-zip` | Do not create the ZIP bundle | Off |
-| `--noextract` | Keep only the ZIP, remove the directory | Off |
+| `--noextract` | Keep ZIP and standalone HTML without extracting the directory | Off |
 | `--extract` | Keep the directory (the default) | On |
 | `-a`, `--adapters <FILE>` | Custom adapter list | Built-in list |
 | `-c`, `--contaminants <FILE>` | Custom contaminant list | Built-in list |
@@ -135,6 +135,7 @@ Adapter and contaminant files use FastQC's format: `name<TAB>sequence`, with
   kira_qc.json      (with --json)
   latex/            (with --export-latex)
 <out>/<sample>_fastqc.zip
+<out>/<sample>_fastqc.html
 ```
 
 The sample name strips both the compression suffix and the FASTQ suffix, so

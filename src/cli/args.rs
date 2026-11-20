@@ -73,7 +73,7 @@ pub struct RunArgs {
     #[arg(long, default_value_t = false)]
     pub no_zip: bool,
 
-    /// Keep only the ZIP bundle and remove the unpacked report directory.
+    /// Keep ZIP and standalone HTML without extracting the report directory.
     #[arg(long, default_value_t = false)]
     pub noextract: bool,
 
