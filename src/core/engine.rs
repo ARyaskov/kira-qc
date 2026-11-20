@@ -133,23 +133,10 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     let threads = cfg.threads.max(1);
     let (chunk_tx, chunk_rx) = channel::bounded::<PackedChunk>(CHANNEL_SLACK);
     let (result_tx, result_rx) = channel::bounded::<(Agg, WorkerStats)>(threads);
-    let (err_tx, err_rx) = channel::bounded::<anyhow::Error>(1);
-    let (meta_tx, meta_rx) = channel::bounded::<ProducerMeta>(1);
-
     let producer_input = cfg.input.clone();
-    let producer_err = err_tx.clone();
     let phred_cfg = cfg.phred_offset;
     let mode = cfg.mode;
-    let producer = thread::spawn(move || {
-        run_producer(
-            producer_input,
-            phred_cfg,
-            mode,
-            chunk_tx,
-            producer_err,
-            meta_tx,
-        );
-    });
+    let producer = thread::spawn(move || run_producer(producer_input, phred_cfg, mode, chunk_tx));
 
     let agg_cfg = AggConfig {
         mode: cfg.mode,
@@ -174,7 +161,6 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     }
     drop(chunk_rx);
     drop(result_tx);
-    drop(err_tx);
     log.stage("engine.spawn_workers", t_workers);
 
     let t_collect = Instant::now();
@@ -182,69 +168,31 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     let mut worker_stats_total = WorkerStats::default();
     let mut wait_time = Duration::ZERO;
     let mut merge_time = Duration::ZERO;
-    let mut first_error: Option<anyhow::Error> = None;
-
-    let mut err_open = true;
-    let mut results_open = true;
-    while results_open {
+    loop {
         let t_wait = Instant::now();
-        let msg = if err_open {
-            channel::select! {
-                recv(err_rx) -> err => match err {
-                    Ok(err) => {
-                        // Record the failure but keep draining so the worker
-                        // threads can finish and be joined cleanly.
-                        if first_error.is_none() {
-                            first_error = Some(err);
-                        }
-                        err_open = false;
-                        continue;
-                    }
-                    Err(_) => {
-                        err_open = false;
-                        continue;
-                    }
-                },
-                recv(result_rx) -> msg => msg,
-            }
-        } else {
-            result_rx.recv()
-        };
+        let result = result_rx.recv();
         wait_time += t_wait.elapsed();
-
-        match msg {
-            Ok((agg, ws)) => {
-                let tm = Instant::now();
-                final_agg.merge(&agg);
-                merge_time += tm.elapsed();
-                accumulate_worker_stats(&mut worker_stats_total, &ws);
-            }
-            Err(_) => {
-                results_open = false;
-            }
-        }
+        let Ok((agg, stats)) = result else {
+            break;
+        };
+        let t_merge = Instant::now();
+        final_agg.merge(&agg);
+        merge_time += t_merge.elapsed();
+        accumulate_worker_stats(&mut worker_stats_total, &stats);
     }
     log.stage("engine.collect_merge", t_collect);
 
-    // A panicking worker used to be silently dropped, producing a report with
-    // missing reads and no error.
-    if producer.join().is_err() {
-        bail!("FASTQ producer thread panicked");
-    }
+    let producer_result = producer.join();
     let mut panicked = 0usize;
-    for w in workers {
-        if w.join().is_err() {
+    for worker in workers {
+        if worker.join().is_err() {
             panicked += 1;
         }
     }
     if panicked > 0 {
         bail!("{panicked} worker thread(s) panicked; results would be incomplete");
     }
-    if let Some(err) = first_error {
-        return Err(err);
-    }
-
-    let meta = meta_rx.recv().unwrap_or_default();
+    let meta = producer_result.map_err(|_| anyhow!("FASTQ producer thread panicked"))??;
     if final_agg.total_reads == 0 {
         bail!("no FASTQ records found in input");
     }
@@ -302,17 +250,8 @@ fn run_producer(
     phred_cfg: PhredOffsetConfig,
     mode: Mode,
     chunk_tx: channel::Sender<PackedChunk>,
-    err_tx: channel::Sender<anyhow::Error>,
-    meta_tx: channel::Sender<ProducerMeta>,
-) {
-    let mut reader = match open_reader(&input) {
-        Ok(reader) => reader,
-        Err(e) => {
-            let _ = err_tx.send(e);
-            let _ = meta_tx.send(ProducerMeta::default());
-            return;
-        }
-    };
+) -> Result<ProducerMeta> {
+    let mut reader = open_reader(&input)?;
 
     let mut stats = ProducerStats::default();
 
@@ -336,34 +275,23 @@ fn run_producer(
 
     loop {
         let t_next = Instant::now();
-        let rec = match reader.next() {
-            Ok(Some(rec)) => rec,
-            Ok(None) => break,
-            Err(e) => {
-                let _ = err_tx.send(anyhow!("FASTQ parse/read error: {e:?}"));
-                let _ = meta_tx.send(ProducerMeta {
-                    producer: stats,
-                    phred_offset,
-                });
-                return;
-            }
+        let Some(rec) = reader
+            .next()
+            .map_err(|e| anyhow!("FASTQ parse/read error at read {}: {e:?}", read_index + 1))?
+        else {
+            break;
         };
         stats.parse += t_next.elapsed();
 
         let seq = rec.seq();
         let qual = rec.qual();
         if seq.len() != qual.len() {
-            let _ = err_tx.send(anyhow!(
+            bail!(
                 "seq/qual length mismatch at read {}: seq={} qual={}",
                 read_index + 1,
                 seq.len(),
                 qual.len()
-            ));
-            let _ = meta_tx.send(ProducerMeta {
-                producer: stats,
-                phred_offset,
-            });
-            return;
+            );
         }
 
         if !offset_decided {
@@ -408,22 +336,12 @@ fn run_producer(
             if offset_decided {
                 for mut queued in pending.drain(..) {
                     queued.phred_offset = phred_offset;
-                    if chunk_tx.send(queued).is_err() {
-                        let _ = meta_tx.send(ProducerMeta {
-                            producer: stats,
-                            phred_offset,
-                        });
-                        return;
-                    }
+                    chunk_tx
+                        .send(queued)
+                        .context("FASTQ workers disconnected")?;
                 }
                 chunk.phred_offset = phred_offset;
-                if chunk_tx.send(chunk).is_err() {
-                    let _ = meta_tx.send(ProducerMeta {
-                        producer: stats,
-                        phred_offset,
-                    });
-                    return;
-                }
+                chunk_tx.send(chunk).context("FASTQ workers disconnected")?;
             } else {
                 // Hold the chunk back until enough quality bytes have been seen
                 // to pick an encoding.
@@ -449,15 +367,15 @@ fn run_producer(
 
     for mut queued in pending.drain(..) {
         queued.phred_offset = phred_offset;
-        if chunk_tx.send(queued).is_err() {
-            break;
-        }
+        chunk_tx
+            .send(queued)
+            .context("FASTQ workers disconnected")?;
     }
 
-    let _ = meta_tx.send(ProducerMeta {
+    Ok(ProducerMeta {
         producer: stats,
         phred_offset,
-    });
+    })
 }
 
 /// Quality-encoding detector.

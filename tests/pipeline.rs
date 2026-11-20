@@ -216,6 +216,25 @@ fn automatic_phred64_applies_to_the_chunk_that_resolves_encoding() {
 }
 
 #[test]
+fn malformed_input_after_a_full_chunk_fails_the_run() {
+    use std::io::Write;
+
+    let path = scratch("truncated_after_chunk").join("reads.fastq");
+    write_fastq(&path, 11_000, false);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"@broken\nACGT\n+\n!\n").unwrap();
+    drop(file);
+
+    let mut cfg = config(&path, 4, Mode::Short);
+    cfg.phred_offset = PhredOffsetConfig::Fixed(33);
+    let error = run(cfg).err().expect("partial input must fail").to_string();
+    assert!(error.contains("read 11001"), "{error}");
+}
+
+#[test]
 fn phred_detection_rules() {
     // Modern high-quality Illumina data must not be read as Phred+64.
     assert_eq!(decide_phred_offset(70, 70, 5_000, Mode::Short), 33);
