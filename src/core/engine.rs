@@ -399,7 +399,7 @@ fn run_producer(
                 offset_decided = true;
             }
             let next_index = read_index;
-            let chunk =
+            let mut chunk =
                 std::mem::replace(&mut current, PackedChunk::empty(next_index, phred_offset));
             stats.chunks += 1;
             stats.reads += chunk.offsets.len() as u64;
@@ -416,6 +416,7 @@ fn run_producer(
                         return;
                     }
                 }
+                chunk.phred_offset = phred_offset;
                 if chunk_tx.send(chunk).is_err() {
                     let _ = meta_tx.send(ProducerMeta {
                         producer: stats,

@@ -200,6 +200,22 @@ fn empty_input_is_an_error_not_an_empty_report() {
 }
 
 #[test]
+fn automatic_phred64_applies_to_the_chunk_that_resolves_encoding() {
+    let path = scratch("phred64_chunk").join("reads.fastq");
+    let record = format!("@read\n{}\n+\n{}\n", "ACGT".repeat(25), "h".repeat(100));
+    std::fs::write(&path, record.repeat(110_000)).unwrap();
+
+    let automatic = run(config(&path, 2, Mode::Short)).unwrap();
+    let mut fixed_config = config(&path, 2, Mode::Short);
+    fixed_config.phred_offset = PhredOffsetConfig::Fixed(64);
+    let fixed = run(fixed_config).unwrap();
+    assert_eq!(automatic.ctx.encoding, Encoding::Illumina15);
+    assert_eq!(automatic.agg.total_reads, 110_000);
+    assert_eq!(automatic.agg.per_pos_qual, fixed.agg.per_pos_qual);
+    assert_eq!(automatic.agg.per_seq_mean_q_hist[40], 110_000);
+}
+
+#[test]
 fn phred_detection_rules() {
     // Modern high-quality Illumina data must not be read as Phred+64.
     assert_eq!(decide_phred_offset(70, 70, 5_000, Mode::Short), 33);
