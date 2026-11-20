@@ -1,5 +1,8 @@
+use crate::core::model::BaseGroup;
+
+#[derive(Clone, Debug)]
 pub struct PerBaseQualRow {
-    pub base: usize,
+    pub group: BaseGroup,
     pub mean: f64,
     pub median: u8,
     pub lower_quartile: u8,

@@ -5,7 +5,19 @@ use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn write_zip(out_dir: &Path, sample_name: &str) -> Result<()> {
+/// Fixed archive timestamp so repeated runs produce byte-identical bundles.
+pub fn deterministic_time() -> zip::DateTime {
+    zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("valid fixed timestamp")
+}
+
+pub fn options() -> SimpleFileOptions {
+    SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .last_modified_time(deterministic_time())
+}
+
+/// Bundle the report directory, mirroring FastQC's `<sample>_fastqc.zip` layout.
+pub fn write_zip(out_dir: &Path, sample_name: &str, extra_files: &[String]) -> Result<()> {
     let root = format!("{}_fastqc", sample_name);
     let zip_name = format!("{}_fastqc.zip", sample_name);
     let zip_path = out_dir.join(&zip_name);
@@ -14,7 +26,7 @@ pub fn write_zip(out_dir: &Path, sample_name: &str) -> Result<()> {
     let file = File::create(&tmp_path)
         .with_context(|| format!("failed to create {}", tmp_path.display()))?;
     let mut zip = ZipWriter::new(file);
-    let result = write_zip_entries(&mut zip, out_dir, &root);
+    let result = write_zip_entries(&mut zip, out_dir, &root, extra_files);
 
     match result.and_then(|_| zip.finish().with_context(|| "failed to finalize zip")) {
         Ok(_) => {
@@ -29,21 +41,46 @@ pub fn write_zip(out_dir: &Path, sample_name: &str) -> Result<()> {
     }
 }
 
-fn write_zip_entries(zip: &mut ZipWriter<File>, out_dir: &Path, root: &str) -> Result<()> {
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).unwrap());
+fn write_zip_entries(
+    zip: &mut ZipWriter<File>,
+    out_dir: &Path,
+    root: &str,
+    extra_files: &[String],
+) -> Result<()> {
+    let options = options();
 
     zip.add_directory(format!("{}/", root), options)
         .with_context(|| "failed to add directory entry to zip")?;
 
-    let files = ["fastqc_data.txt", "summary.txt", "fastqc_report.html"];
+    let base = ["fastqc_data.txt", "summary.txt", "fastqc_report.html"];
+    let mut names: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+    names.extend(extra_files.iter().cloned());
+    // Fixed order keeps the archive reproducible.
+    names.sort();
+    names.dedup();
 
-    for name in files {
-        let src_path = out_dir.join(root).join(name);
-        let zip_path = format!("{}/{}", root, name);
+    let mut added_dirs: Vec<String> = Vec::new();
+    for name in names {
+        let src_path = out_dir.join(root).join(&name);
+        if !src_path.is_file() {
+            continue;
+        }
+        // Create parent directory entries for nested files (latex/…).
+        let normalized = name.replace('\\', "/");
+        if let Some(parent) = normalized.rsplit_once('/').map(|(p, _)| p) {
+            let mut acc = String::new();
+            for part in parent.split('/') {
+                acc.push_str(part);
+                acc.push('/');
+                if !added_dirs.contains(&acc) {
+                    zip.add_directory(format!("{}/{}", root, acc), options)?;
+                    added_dirs.push(acc.clone());
+                }
+            }
+        }
+        let zip_path = format!("{}/{}", root, normalized);
         add_file(zip, &src_path, &zip_path, options)
-            .with_context(|| format!("failed to add {} to zip", name))?;
+            .with_context(|| format!("failed to add {} to zip", normalized))?;
     }
     Ok(())
 }
@@ -57,7 +94,7 @@ fn add_file(
     let mut file =
         File::open(src_path).with_context(|| format!("failed to open {}", src_path.display()))?;
     zip.start_file(zip_path, options)?;
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -66,4 +103,31 @@ fn add_file(
         zip.write_all(&buf[..n])?;
     }
     Ok(())
+}
+
+/// Relative paths of every file under `dir`, using `/` separators.
+pub fn list_files_recursive(dir: &Path, prefix: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("failed to list {}", dir.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(list_files_recursive(&path, &rel)?);
+        } else {
+            out.push(rel);
+        }
+    }
+    Ok(out)
 }

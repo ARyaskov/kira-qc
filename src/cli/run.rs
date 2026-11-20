@@ -1,201 +1,356 @@
-use crate::cli::args::{Cli, Commands, LatexExportArg, ModeArg, PhredOffsetArg, RunArgs};
-use crate::core::engine::{self, PhredOffsetConfig, RunConfig};
-use crate::core::model::Mode;
+use crate::cli::args::{Cli, FormatArg, ModeArg, PhredOffsetArg, RunArgs};
+use crate::core::engine::{self, Input, PhredOffsetConfig, RunConfig};
+use crate::core::metrics::{AdapterSet, ContaminantList};
+use crate::core::model::{Encoding, Mode};
+use crate::core::stats::StatsLog;
 use crate::report;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use std::env;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 pub fn entry() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        Commands::Run(args) => run(args),
-    }
+    run(cli.into_run_args())
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    let stats = stats_enabled();
+    preflight(&args)?;
+
+    let adapter_mode = match args.mode {
+        ModeArg::Short => Mode::Short,
+        ModeArg::Long => Mode::Long,
+    };
+    let adapters = match &args.adapters {
+        Some(path) => AdapterSet::from_file(path, adapter_mode == Mode::Long)?,
+        None => AdapterSet::default_for(adapter_mode),
+    };
+    let contaminants = match &args.contaminants {
+        Some(path) => ContaminantList::from_file(path)?,
+        None => ContaminantList::builtin(),
+    };
+    let ignored_modules = match &args.limits {
+        Some(path) => load_limits(path, args.quiet)?,
+        None => Vec::new(),
+    };
+
+    for reads in &args.reads {
+        run_one(
+            reads,
+            &args,
+            adapter_mode,
+            adapters.clone(),
+            contaminants.clone(),
+            &ignored_modules,
+        )?;
+    }
+    Ok(())
+}
+
+fn preflight(args: &RunArgs) -> Result<()> {
+    if args.reads.is_empty() {
+        bail!("no input files given; run `kira-qc --help` for usage");
+    }
+    if args.threads == 0 {
+        bail!("--threads must be >= 1");
+    }
+    if args.sample_name.is_some() && args.reads.len() > 1 {
+        bail!("--sample-name cannot be used with more than one input file");
+    }
+    if args.no_zip && args.noextract {
+        bail!("--no-zip and --noextract together would leave no output");
+    }
+    if args.format != FormatArg::Fastq {
+        bail!(
+            "input format {:?} is not supported; convert it first, for example \
+             `samtools fastq in.bam | kira-qc - -o qc/`",
+            args.format
+        );
+    }
+
+    let mut seen_stdin = false;
+    for reads in &args.reads {
+        if reads.as_os_str() == "-" {
+            if seen_stdin {
+                bail!("stdin can only be read once");
+            }
+            seen_stdin = true;
+            continue;
+        }
+        if !reads.is_file() {
+            bail!("input file not found: {}", reads.display());
+        }
+    }
+    Ok(())
+}
+
+fn run_one(
+    reads: &Path,
+    args: &RunArgs,
+    mode: Mode,
+    adapters: Arc<AdapterSet>,
+    contaminants: Arc<ContaminantList>,
+    ignored_modules: &[String],
+) -> Result<()> {
+    let log = StatsLog::from_env();
     let t0 = Instant::now();
+    let is_stdin = reads.as_os_str() == "-";
 
-    stage(stats, "preflight", || {
-        if args.reads1.as_os_str() == "-" {
-            bail!("stdin is not supported in Stage 1; provide a FASTQ file path");
-        }
-        if !args.reads1.is_file() {
-            bail!("input file not found: {}", args.reads1.display());
-        }
-        if args.threads == 0 {
-            bail!("--threads must be >= 1");
-        }
-        Ok(())
-    })?;
+    let input = if is_stdin {
+        Input::Stdin
+    } else {
+        Input::Path(reads.to_path_buf())
+    };
 
-    let input_size = fs::metadata(&args.reads1).map(|m| m.len()).unwrap_or(0);
-
-    let t_name = Instant::now();
-    let sample_name = match args.sample_name {
-        Some(s) => s,
-        None => args
-            .reads1
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
+    let sample_name = match &args.sample_name {
+        Some(s) => s.clone(),
+        None if is_stdin => "stdin".to_string(),
+        None => sample_name_from_path(reads)
             .context("failed to determine sample name from input file")?,
     };
-    stage_done(stats, "sample-name", t_name);
 
-    let t_phred = Instant::now();
+    // FastQC writes next to the input file when no output directory is given.
+    let out_root = match &args.out {
+        Some(dir) => dir.clone(),
+        None if is_stdin => PathBuf::from("."),
+        None => reads.parent().unwrap_or(Path::new(".")).to_path_buf(),
+    };
+    let out_dir = out_root.join(format!("{}_fastqc", sample_name));
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
+
     let phred_offset = match args.phred_offset {
         PhredOffsetArg::Auto => PhredOffsetConfig::Auto,
         PhredOffsetArg::P33 => PhredOffsetConfig::Fixed(33),
         PhredOffsetArg::P64 => PhredOffsetConfig::Fixed(64),
     };
-    stage_done(stats, "phred-config", t_phred);
-
-    let t_mode = Instant::now();
-    let mode = match args.mode {
-        ModeArg::Short => Mode::Short,
-        ModeArg::Long => Mode::Long,
-    };
-    stage_done(stats, "mode", t_mode);
-
-    let t_out = Instant::now();
-    let out_dir = args.out.join(format!("{}_fastqc", sample_name));
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
-    stage_done(stats, "mkdir", t_out);
 
     let config = RunConfig {
-        reads1: args.reads1.clone(),
+        input,
         sample_name: sample_name.clone(),
         threads: args.threads,
         phred_offset,
         mode,
+        kmer_enabled: args.kmers,
+        dup_window: args.dup_window,
+        nogroup: args.nogroup,
+        adapters,
+        contaminants,
+        ignored_modules: ignored_modules.to_vec(),
     };
 
     let t_engine = Instant::now();
-    let output = engine::run(config)?;
-    stage_done(stats, "engine", t_engine);
-    if stats {
-        eprintln!(
-            "KIRA_STATS input={} bytes={} reads={} bases={}",
-            args.reads1.display(),
-            input_size,
-            output.agg.total_reads,
-            output.agg.total_bases
-        );
+    let output =
+        engine::run(config).with_context(|| format!("failed to analyse {}", reads.display()))?;
+    log.stage("engine", t_engine);
+
+    if !args.quiet {
+        warn_about_encoding(&output.ctx.encoding, args);
+        warn_about_mode(&output.agg, mode);
     }
 
     let t_finalize = Instant::now();
     let metrics = output.agg.finalize(&output.ctx);
-    stage_done(stats, "finalize", t_finalize);
+    log.stage("finalize", t_finalize);
 
-    let fastqc_path = out_dir.join("fastqc_data.txt");
-    let summary_path = out_dir.join("summary.txt");
-    let html_path = out_dir.join("fastqc_report.html");
+    report::fastqc_txt::write(&out_dir.join("fastqc_data.txt"), &metrics, &output.ctx)?;
+    report::summary_txt::write(&out_dir.join("summary.txt"), &metrics, &output.ctx)?;
+    report::html::write(&out_dir.join("fastqc_report.html"), &metrics, &output.ctx)?;
 
-    let t_fastqc = Instant::now();
-    report::fastqc_txt::write(&fastqc_path, &metrics, &output.ctx)
-        .with_context(|| format!("failed to write {}", fastqc_path.display()))?;
-    stage_done(stats, "fastqc_data", t_fastqc);
-    if stats {
-        let fastqc_size = fs::metadata(&fastqc_path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "KIRA_STATS output fastqc_data={} bytes={}",
-            fastqc_path.display(),
-            fastqc_size
-        );
+    let mut extra_files: Vec<String> = Vec::new();
+    if args.json {
+        report::json::write(&out_dir.join("kira_qc.json"), &metrics, &output.ctx)?;
+        extra_files.push("kira_qc.json".to_string());
     }
 
-    let t_summary = Instant::now();
-    report::summary_txt::write(&summary_path, &metrics, &output.ctx)
-        .with_context(|| format!("failed to write {}", summary_path.display()))?;
-    stage_done(stats, "summary", t_summary);
-    if stats {
-        let summary_size = fs::metadata(&summary_path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "KIRA_STATS output summary={} bytes={}",
-            summary_path.display(),
-            summary_size
-        );
-    }
-
-    let t_html = Instant::now();
-    report::html::write(&html_path, &metrics, &output.ctx)
-        .with_context(|| format!("failed to write {}", html_path.display()))?;
-    stage_done(stats, "html", t_html);
-    if stats {
-        let html_size = fs::metadata(&html_path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "KIRA_STATS output html={} bytes={}",
-            html_path.display(),
-            html_size
-        );
+    #[cfg(feature = "latex")]
+    if let Some(export) = args.export_latex {
+        use crate::cli::args::LatexExportArg;
+        let latex_mode = match export {
+            LatexExportArg::Summary => report::latex::LatexMode::Summary,
+            LatexExportArg::Supplement => report::latex::LatexMode::Supplement,
+        };
+        let t_latex = Instant::now();
+        report::latex::write(&out_dir, &metrics, &output.ctx, latex_mode)
+            .with_context(|| "failed to write LaTeX export")?;
+        log.stage("latex", t_latex);
+        for name in report::zip::list_files_recursive(&out_dir.join("latex"), "latex")? {
+            // The Overleaf archive is a packaging of the same directory; adding
+            // it would duplicate every figure inside the outer bundle.
+            if name.ends_with("kira_qc_latex.zip") {
+                continue;
+            }
+            extra_files.push(name);
+        }
     }
 
     if !args.no_zip {
         let t_zip = Instant::now();
-        report::zip::write_zip(&args.out, &sample_name)
+        report::zip::write_zip(&out_root, &sample_name, &extra_files)
             .with_context(|| "failed to create zip output")?;
-        stage_done(stats, "zip", t_zip);
-        if stats {
-            let zip_path = args.out.join(format!("{}_fastqc.zip", sample_name));
-            let zip_size = fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "KIRA_STATS output zip={} bytes={}",
-                zip_path.display(),
-                zip_size
+        log.stage("zip", t_zip);
+    }
+
+    if args.noextract {
+        fs::remove_dir_all(&out_dir)
+            .with_context(|| format!("failed to remove {}", out_dir.display()))?;
+    } else if !args.quiet {
+        eprintln!("kira-qc: wrote {}", out_dir.display());
+    }
+
+    log.line(format_args!(
+        "input={} reads={} bases={} total={}",
+        reads.display(),
+        output.agg.total_reads,
+        output.agg.total_bases,
+        crate::core::stats::fmt_dur(t0.elapsed())
+    ));
+    Ok(())
+}
+
+/// FastQC's output naming: strip the compression suffix, then the FASTQ
+/// suffix. `sample.fastq.gz` becomes `sample_fastqc`, not `sample.fastq_fastqc`.
+pub fn sample_name_from_path(path: &Path) -> Option<String> {
+    let mut name = path.file_name()?.to_str()?.to_string();
+    for suffix in [".gz", ".bz2", ".zst", ".xz", ".bgz", ".bgzf"] {
+        if name.to_ascii_lowercase().ends_with(suffix) {
+            name.truncate(name.len() - suffix.len());
+            break;
+        }
+    }
+    for suffix in [
+        ".fastq", ".fq", ".fasta", ".fa", ".fna", ".txt", ".sam", ".bam", ".cram",
+    ] {
+        if name.to_ascii_lowercase().ends_with(suffix) {
+            name.truncate(name.len() - suffix.len());
+            break;
+        }
+    }
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// FastQC limits file. Only `ignore` is actionable here; threshold overrides
+/// are reported as unsupported instead of being silently dropped.
+fn load_limits(path: &Path, quiet: bool) -> Result<Vec<String>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read limits file {}", path.display()))?;
+    let mut ignored = Vec::new();
+    let mut unsupported = Vec::new();
+
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            bail!(
+                "{}:{}: expected '<module> <warn|error|ignore> <value>'",
+                path.display(),
+                lineno + 1
+            );
+        }
+        let value: f64 = fields[fields.len() - 1]
+            .parse()
+            .with_context(|| format!("{}:{}: value is not a number", path.display(), lineno + 1))?;
+        let directive = fields[fields.len() - 2].to_ascii_lowercase();
+        let module = fields[..fields.len() - 2].join(" ");
+
+        match directive.as_str() {
+            "ignore" => {
+                if value != 0.0 {
+                    let anchor = report::resolve_limits_key(&module).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{}:{}: unknown module '{}'",
+                            path.display(),
+                            lineno + 1,
+                            module
+                        )
+                    })?;
+                    ignored.push(anchor.to_string());
+                }
+            }
+            "warn" | "error" => unsupported.push(module),
+            other => bail!(
+                "{}:{}: unknown directive '{}'",
+                path.display(),
+                lineno + 1,
+                other
+            ),
+        }
+    }
+
+    if !quiet && !unsupported.is_empty() {
+        unsupported.sort();
+        unsupported.dedup();
+        eprintln!(
+            "kira-qc: warning: threshold overrides in {} are not applied ({}); \
+             only `ignore` directives are honoured",
+            path.display(),
+            unsupported.join(", ")
+        );
+    }
+    Ok(ignored)
+}
+
+fn warn_about_encoding(encoding: &Encoding, args: &RunArgs) {
+    if *encoding == Encoding::Illumina15 && matches!(args.phred_offset, PhredOffsetArg::Auto) {
+        eprintln!(
+            "kira-qc: warning: quality scores look like Phred+64 (Illumina 1.5). \
+             If this is modern data, re-run with --phred-offset 33."
+        );
+    }
+}
+
+fn warn_about_mode(agg: &crate::core::metrics::Agg, mode: Mode) {
+    let max_len = agg.length_hist.max_len();
+    match mode {
+        Mode::Short if max_len > 1_000 => eprintln!(
+            "kira-qc: warning: reads up to {} bp in short-read mode. \
+             Per-base modules assume uniform short reads; consider --mode long.",
+            max_len
+        ),
+        Mode::Long if max_len > 0 && max_len < 500 => eprintln!(
+            "kira-qc: warning: longest read is {} bp in long-read mode. \
+             Consider --mode short for Illumina data.",
+            max_len
+        ),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_names_drop_compression_and_fastq_suffixes() {
+        let cases = [
+            ("sample.fastq.gz", "sample"),
+            ("sample.fq.gz", "sample"),
+            ("sample.fastq", "sample"),
+            ("sample.fq", "sample"),
+            ("sample.txt", "sample"),
+            ("reads_R1_001.fastq.gz", "reads_R1_001"),
+            ("sample", "sample"),
+            ("sample.other", "sample.other"),
+        ];
+        for (input, expect) in cases {
+            assert_eq!(
+                sample_name_from_path(Path::new(input)).as_deref(),
+                Some(expect),
+                "input {input}"
             );
         }
     }
 
-    if let Some(export) = args.export_latex {
-        let t_latex = Instant::now();
-        let mode = match export {
-            LatexExportArg::Summary => report::latex::LatexMode::Summary,
-            LatexExportArg::Supplement => report::latex::LatexMode::Supplement,
-        };
-        report::latex::write(&out_dir, &metrics, &output.ctx, mode)
-            .with_context(|| "failed to write LaTeX export")?;
-        stage_done(stats, "latex", t_latex);
-    }
-
-    if stats {
-        eprintln!("KIRA_STATS output_dir={}", out_dir.display());
-        eprintln!("KIRA_STATS total={}", fmt_dur(t0.elapsed()));
-    }
-
-    Ok(())
-}
-
-fn stats_enabled() -> bool {
-    matches!(env::var("KIRA_STATS").as_deref(), Ok("1"))
-}
-
-fn stage<F>(stats: bool, name: &str, f: F) -> Result<()>
-where
-    F: FnOnce() -> Result<()>,
-{
-    let t = Instant::now();
-    let res = f();
-    if stats {
-        eprintln!("KIRA_STATS stage={} time={}", name, fmt_dur(t.elapsed()));
-    }
-    res
-}
-
-fn stage_done(stats: bool, name: &str, t: Instant) {
-    if stats {
-        eprintln!("KIRA_STATS stage={} time={}", name, fmt_dur(t.elapsed()));
-    }
-}
-
-fn fmt_dur(d: Duration) -> String {
-    if d.as_secs_f64() < 1.0 {
-        format!("{}ms", d.as_millis())
-    } else {
-        format!("{:.3}s", d.as_secs_f64())
+    #[test]
+    fn sample_names_are_case_insensitive() {
+        assert_eq!(
+            sample_name_from_path(Path::new("Sample.FASTQ.GZ")).as_deref(),
+            Some("Sample")
+        );
     }
 }

@@ -1,77 +1,84 @@
-use crate::core::metrics::FinalMetrics;
-use crate::core::model::{FinalizeContext, Mode};
+use crate::core::metrics::{BasicStats, FinalMetrics};
+use crate::core::model::FinalizeContext;
+use crate::report::{ModuleId, active_modules};
+use crate::{FASTQC_FORMAT_VERSION, KIRA_QC_VERSION};
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
 pub fn write(path: &Path, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
-    let mut w =
-        BufWriter::new(File::create(path).with_context(|| "create fastqc_data.txt failed")?);
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut w = BufWriter::new(file);
+    write_to(&mut w, metrics, ctx)
+}
 
-    write_basic(&mut w, metrics, &ctx.file_name)?;
-    match ctx.mode {
-        Mode::Short => {
-            write_per_base_quality(&mut w, metrics)?;
-            write_per_seq_quality(&mut w, metrics)?;
-            write_per_base_content(&mut w, metrics)?;
-            write_per_seq_gc(&mut w, metrics)?;
-            write_per_base_n(&mut w, metrics)?;
-            write_length_dist_short(&mut w, metrics)?;
-            write_duplication(&mut w, metrics)?;
-            write_overrep(&mut w, metrics)?;
-            write_adapter_content_short(&mut w, metrics)?;
-            #[cfg(not(feature = "no-kmer"))]
-            write_kmer_content(&mut w, metrics)?;
-        }
-        Mode::Long => {
-            write_length_dist_long(&mut w, metrics)?;
-            write_per_seq_quality(&mut w, metrics)?;
-            write_per_seq_gc(&mut w, metrics)?;
-            write_per_seq_n(&mut w, metrics)?;
-            write_adapter_content_long(&mut w, metrics)?;
-        }
+pub fn write_to(w: &mut dyn Write, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
+    // MultiQC keys off this header line to identify the file and its format.
+    writeln!(w, "##FastQC\t{}", FASTQC_FORMAT_VERSION)?;
+    writeln!(w, "##kira-qc\t{}", KIRA_QC_VERSION)?;
+
+    for module in active_modules(metrics, ctx) {
+        writeln!(
+            w,
+            ">>{}\t{}",
+            module.title(),
+            module.status(metrics).as_str_lower()
+        )?;
+        write_body(w, module, metrics, ctx)?;
+        writeln!(w, ">>END_MODULE")?;
     }
-
     Ok(())
 }
 
-fn write_basic(w: &mut dyn Write, metrics: &FinalMetrics, file_name: &str) -> Result<()> {
-    writeln!(
-        w,
-        ">>Basic Statistics\t{}",
-        metrics.statuses.basic.as_str_lower()
-    )?;
-    writeln!(w, "#Measure\tValue")?;
-    writeln!(w, "Filename\t{}", file_name)?;
-    writeln!(w, "File type\t{}", metrics.basic.file_type)?;
-    writeln!(w, "Encoding\t{}", metrics.basic.encoding)?;
-    writeln!(w, "Total Sequences\t{}", metrics.basic.total_sequences)?;
-    writeln!(
-        w,
-        "Filtered Sequences\t{}",
-        metrics.basic.filtered_sequences
-    )?;
-    if metrics.basic.min_len == metrics.basic.max_len {
-        writeln!(w, "Sequence length\t{}", metrics.basic.min_len)?;
-    } else {
-        writeln!(
-            w,
-            "Sequence length\t{}-{}",
-            metrics.basic.min_len, metrics.basic.max_len
-        )?;
+fn write_body(
+    w: &mut dyn Write,
+    module: ModuleId,
+    metrics: &FinalMetrics,
+    ctx: &FinalizeContext,
+) -> Result<()> {
+    match module {
+        ModuleId::Basic => write_basic(w, metrics, ctx),
+        ModuleId::PerBaseQual => write_per_base_quality(w, metrics),
+        ModuleId::PerTile => write_per_tile(w, metrics),
+        ModuleId::PerSeqQual => write_per_seq_quality(w, metrics),
+        ModuleId::PerBaseContent => write_per_base_content(w, metrics),
+        ModuleId::PerSeqGc => write_per_seq_gc(w, metrics),
+        ModuleId::PerBaseN => write_per_base_n(w, metrics),
+        ModuleId::PerSeqN => write_per_seq_n(w, metrics),
+        ModuleId::LengthDist => write_length_dist(w, metrics, ctx),
+        ModuleId::Duplication => write_duplication(w, metrics, ctx),
+        ModuleId::Overrepresented => write_overrep(w, metrics),
+        ModuleId::AdapterContent => write_adapter_content(w, metrics, ctx),
+        ModuleId::KmerContent => write_kmer_content(w, metrics),
     }
-    writeln!(w, "%GC\t{}", metrics.basic.gc_percent)?;
-    writeln!(w, ">>END_MODULE")?;
+}
+
+fn write_basic(w: &mut dyn Write, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Result<()> {
+    let b = &metrics.basic;
+    writeln!(w, "#Measure\tValue")?;
+    writeln!(w, "Filename\t{}", ctx.file_name)?;
+    writeln!(w, "File type\t{}", b.file_type)?;
+    writeln!(w, "Encoding\t{}", b.encoding)?;
+    writeln!(w, "Total Sequences\t{}", b.total_sequences)?;
+    // Added in FastQC 0.12 and parsed by MultiQC.
+    writeln!(
+        w,
+        "Total Bases\t{}",
+        BasicStats::format_bases(b.total_bases)
+    )?;
+    writeln!(
+        w,
+        "Sequences flagged as poor quality\t{}",
+        b.poor_quality_sequences
+    )?;
+    writeln!(w, "Sequence length\t{}", b.length_range())?;
+    writeln!(w, "%GC\t{}", b.gc_percent)?;
     Ok(())
 }
 
 fn write_per_base_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per base sequence quality\t{}",
-        metrics.statuses.per_base_qual.as_str_lower()
-    )?;
     writeln!(
         w,
         "#Base\tMean\tMedian\tLower Quartile\tUpper Quartile\t10th Percentile\t90th Percentile"
@@ -80,7 +87,7 @@ fn write_per_base_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<(
         writeln!(
             w,
             "{}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
-            row.base,
+            row.group.label(),
             row.mean,
             row.median,
             row.lower_quartile,
@@ -89,203 +96,189 @@ fn write_per_base_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<(
             row.p90
         )?;
     }
-    writeln!(w, ">>END_MODULE")?;
+    Ok(())
+}
+
+fn write_per_tile(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
+    writeln!(w, "#Tile\tBase\tMean")?;
+    for row in &metrics.per_tile {
+        writeln!(
+            w,
+            "{}\t{}\t{:.5}",
+            row.tile,
+            row.group.label(),
+            row.mean_deviation
+        )?;
+    }
     Ok(())
 }
 
 fn write_per_seq_quality(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per sequence quality scores\t{}",
-        metrics.statuses.per_seq_qual.as_str_lower()
-    )?;
     writeln!(w, "#Quality\tCount")?;
     for row in &metrics.per_seq_qual {
         writeln!(w, "{}\t{}", row.mean_q, row.count)?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
 fn write_per_base_content(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per base sequence content\t{}",
-        metrics.statuses.per_base_content.as_str_lower()
-    )?;
     writeln!(w, "#Base\tG\tA\tT\tC")?;
     for row in &metrics.per_base_content {
         writeln!(
             w,
             "{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
-            row.base, row.g, row.a, row.t, row.c
+            row.group.label(),
+            row.g,
+            row.a,
+            row.t,
+            row.c
         )?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
 fn write_per_seq_gc(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per sequence GC content\t{}",
-        metrics.statuses.per_seq_gc.as_str_lower()
-    )?;
     writeln!(w, "#GC Content\tCount")?;
     for row in &metrics.per_seq_gc {
         writeln!(w, "{}\t{}", row.gc, row.count)?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
 fn write_per_base_n(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per base N content\t{}",
-        metrics.statuses.per_base_n.as_str_lower()
-    )?;
     writeln!(w, "#Base\tN-Count")?;
     for row in &metrics.per_base_n {
-        writeln!(w, "{}\t{:.1}", row.base, row.n_percent)?;
+        writeln!(w, "{}\t{:.1}", row.group.label(), row.n_percent)?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
 fn write_per_seq_n(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Per sequence N content\t{}",
-        metrics.statuses.per_seq_n.as_str_lower()
-    )?;
     writeln!(w, "#N%\tCount")?;
     for row in &metrics.per_seq_n {
         writeln!(w, "{}\t{}", row.n_percent, row.count)?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
-fn write_length_dist_short(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Sequence Length Distribution\t{}",
-        metrics.statuses.length_dist.as_str_lower()
-    )?;
-    writeln!(w, "#Length\tCount")?;
-    for row in &metrics.length_dist {
-        writeln!(w, "{}\t{}", row.length, row.count)?;
-    }
-    writeln!(w, ">>END_MODULE")?;
-    Ok(())
-}
-
-fn write_length_dist_long(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Sequence Length Distribution\t{}",
-        metrics.statuses.length_dist.as_str_lower()
-    )?;
+fn write_length_dist(
+    w: &mut dyn Write,
+    metrics: &FinalMetrics,
+    _ctx: &FinalizeContext,
+) -> Result<()> {
     if let Some(ref ll) = metrics.long_length {
+        // Long-read summary: the headline numbers first, then the log-scaled
+        // histogram. N50/N90 are exact, not bin midpoints.
         writeln!(w, "#Metric\tValue")?;
         writeln!(w, "Min\t{}", ll.min)?;
         writeln!(w, "Max\t{}", ll.max)?;
         writeln!(w, "Mean\t{:.1}", ll.mean)?;
+        writeln!(w, "Median\t{}", ll.median)?;
         writeln!(w, "N50\t{}", ll.n50)?;
         writeln!(w, "N90\t{}", ll.n90)?;
+        writeln!(w, "Total Bases\t{}", ll.total_bases)?;
         writeln!(w, "#Length\tCount")?;
-        for i in 0..ll.bins.len() {
-            writeln!(w, "{}\t{}", ll.labels[i], ll.bins[i])?;
+        for (label, count) in &ll.bins {
+            writeln!(w, "{}\t{}", label, count)?;
+        }
+    } else {
+        writeln!(w, "#Length\tCount")?;
+        for row in &metrics.length_dist {
+            writeln!(w, "{}\t{}", row.length, row.count)?;
         }
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
-fn write_duplication(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
+fn write_duplication(
+    w: &mut dyn Write,
+    metrics: &FinalMetrics,
+    ctx: &FinalizeContext,
+) -> Result<()> {
+    let Some(ref summary) = metrics.duplication_summary else {
+        writeln!(
+            w,
+            "#Duplication Level\tPercentage of deduplicated\tPercentage of total"
+        )?;
+        return Ok(());
+    };
+
+    // MultiQC reads this exact line for the "% Dups" column in General Stats,
+    // and the three-column table below for the duplication plot.
     writeln!(
         w,
-        ">>Sequence Duplication Levels\t{}",
-        metrics.statuses.duplication.as_str_lower()
+        "#Total Deduplicated Percentage\t{:.4}",
+        summary.total_deduplicated_percent
     )?;
-    writeln!(w, "#Duplication Level\tRelative Count")?;
-    for row in &metrics.duplication {
-        writeln!(w, "{}\t{:.2}", row.level.as_str(), row.relative)?;
+    if !ctx.dup_window_complete {
+        writeln!(
+            w,
+            "#Estimated from the first {} reads",
+            ctx.dup_window_reads
+        )?;
     }
-    writeln!(w, ">>END_MODULE")?;
+    writeln!(
+        w,
+        "#Duplication Level\tPercentage of deduplicated\tPercentage of total"
+    )?;
+    for row in &metrics.duplication {
+        writeln!(
+            w,
+            "{}\t{:.6}\t{:.6}",
+            row.level, row.percent_of_deduplicated, row.percent_of_total
+        )?;
+    }
     Ok(())
 }
 
 fn write_overrep(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Overrepresented sequences\t{}",
-        metrics.statuses.overrepresented.as_str_lower()
-    )?;
     writeln!(w, "#Sequence\tCount\tPercentage\tPossible Source")?;
     for row in &metrics.overrepresented {
         writeln!(
             w,
-            "{}\t{}\t{:.2}\t{}",
+            "{}\t{}\t{}\t{}",
             row.sequence, row.count, row.percent, row.source
         )?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
-fn write_adapter_content_short(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Adapter Content\t{}",
-        metrics.statuses.adapter_content.as_str_lower()
-    )?;
-    write!(w, "#Position")?;
-    for name in crate::core::metrics::ADAPTERS {
+fn write_adapter_content(
+    w: &mut dyn Write,
+    metrics: &FinalMetrics,
+    ctx: &FinalizeContext,
+) -> Result<()> {
+    let is_long = metrics.long_length.is_some() || ctx.mode == crate::core::model::Mode::Long;
+    // Column headers are adapter *names*, as FastQC writes them; the previous
+    // implementation emitted raw sequences, which no parser expects.
+    write!(w, "#{}", if is_long { "Adapter" } else { "Position" })?;
+    for name in &metrics.adapter_names {
         write!(w, "\t{}", name)?;
     }
     writeln!(w)?;
+
+    if is_long {
+        if let Some(row) = metrics.adapter_content.first() {
+            write!(w, "Any")?;
+            for v in &row.values {
+                write!(w, "\t{:.1}", v)?;
+            }
+            writeln!(w)?;
+        }
+        return Ok(());
+    }
+
     for row in &metrics.adapter_content {
-        write!(w, "{}", row.position)?;
-        for v in row.values.iter() {
+        write!(w, "{}", row.group.label())?;
+        for v in &row.values {
             write!(w, "\t{:.1}", v)?;
         }
         writeln!(w)?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }
 
-fn write_adapter_content_long(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Adapter Content\t{}",
-        metrics.statuses.adapter_content.as_str_lower()
-    )?;
-    write!(w, "#Adapter")?;
-    for name in crate::core::metrics::ADAPTERS {
-        write!(w, "\t{}", name)?;
-    }
-    writeln!(w)?;
-    if let Some(row) = metrics.adapter_content.first() {
-        write!(w, "Any")?;
-        for v in row.values.iter() {
-            write!(w, "\t{:.1}", v)?;
-        }
-        writeln!(w)?;
-    }
-    writeln!(w, ">>END_MODULE")?;
-    Ok(())
-}
-
-#[cfg(not(feature = "no-kmer"))]
 fn write_kmer_content(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
-    writeln!(
-        w,
-        ">>Kmer Content\t{}",
-        metrics.statuses.kmer_content.as_str_lower()
-    )?;
     writeln!(
         w,
         "#Sequence\tCount\tPValue\tObs/Exp Max\tMax Obs/Exp Position"
@@ -293,10 +286,9 @@ fn write_kmer_content(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     for row in &metrics.kmer_rows {
         writeln!(
             w,
-            "{}\t{}\t{:.2e}\t{:.2}\t{}",
+            "{}\t{}\t{:.3e}\t{:.2}\t{}",
             row.sequence, row.count, row.p_value, row.obs_exp, row.max_pos
         )?;
     }
-    writeln!(w, ">>END_MODULE")?;
     Ok(())
 }

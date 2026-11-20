@@ -1,7 +1,7 @@
 #![cfg(not(feature = "no-kmer"))]
 
 use kira_qc::core::metrics::kmer_content::{
-    BINS, BinCounts, K, KMER_SPACE, decode_kmer, update_kmers,
+    BINS, BinCounts, K, KMER_SPACE, binomial_upper_tail, decode_kmer, update_kmers,
 };
 
 fn key_of(seq: &[u8; K]) -> u16 {
@@ -75,6 +75,17 @@ fn update_kmers_skips_short_reads() {
 }
 
 #[test]
+fn update_kmers_tolerates_disabled_bins() {
+    // With the module switched off the aggregator carries no bins at all.
+    let seq = b"ACGTACGTACGT";
+    let mut bins: Vec<BinCounts> = Vec::new();
+    let mut bin_counts = [0u64; BINS];
+    let mut total = 0u64;
+    update_kmers(seq, seq.len(), &mut bins, &mut bin_counts, &mut total, None);
+    assert_eq!(total, 0);
+}
+
+#[test]
 fn bin_counts_merge_is_associative() {
     let mut a = BinCounts::new();
     let mut b = BinCounts::new();
@@ -92,4 +103,17 @@ fn bin_counts_merge_is_associative() {
     other.merge(&a);
     assert_eq!(other.get(42), 3);
     assert_eq!(other.get(7), 1);
+}
+
+/// The reported p-value used to be `10^(-2*(obs/exp - 1))`, which is not a
+/// probability. It is now an actual binomial tail probability.
+#[test]
+fn p_values_are_real_probabilities() {
+    assert!((binomial_upper_tail(100, 1000, 0.1) - 1.0).abs() < 1e-9);
+    let enriched = binomial_upper_tail(400, 1000, 0.1);
+    assert!(enriched < 1e-20, "p = {enriched}");
+    for obs in [0u64, 10, 100, 900, 1000] {
+        let p = binomial_upper_tail(obs, 1000, 0.25);
+        assert!((0.0..=1.0).contains(&p), "obs={obs} p={p}");
+    }
 }

@@ -2,3 +2,4 @@ pub mod engine;
 pub mod fastq;
 pub mod metrics;
 pub mod model;
+pub mod stats;

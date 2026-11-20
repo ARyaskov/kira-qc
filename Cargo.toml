@@ -1,8 +1,11 @@
 [package]
 name = "kira-qc"
 description = "FastQC-compatible QC tool written in Rust"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+# kira-qc's own code needs 1.88 (edition 2024 plus let-chains), but the
+# effective floor is set by kira-fastq, which declares 1.95. Lowering it
+# requires a kira-fastq release with a lower rust-version.
 rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-qc"
@@ -25,10 +28,13 @@ categories = [
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
-kira-fastq = "0.2"
-zip = "7.2.0"
+kira-fastq = "0.3"
+# Default features drag in zstd-sys, bzip2, lzma and aes; deflate is all a
+# FastQC-style report bundle needs and it keeps `cargo install` free of a C
+# toolchain requirement.
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 aho-corasick = "1"
-svg2pdf = "0.13"
+svg2pdf = { version = "0.13", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rustc-hash = "2"
 
@@ -44,5 +50,9 @@ lto = "fat"
 too_many_arguments = "allow"
 
 [features]
-default = []
+default = ["latex"]
+# LaTeX/PDF export pulls in resvg, usvg, fontdb and friends. Building without
+# it cuts the dependency tree roughly in half.
+latex = ["dep:svg2pdf"]
+# Strip the K-mer module at compile time (it is already off at runtime).
 no-kmer = []
