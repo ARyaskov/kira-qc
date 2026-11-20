@@ -12,8 +12,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Quality bytes examined before committing to an encoding.
+/// Reads examined before committing to an encoding.
 const AUTO_DETECT_READS: usize = 100_000;
+
+/// Packed input retained while trying to distinguish short-read encodings.
+const AUTO_DETECT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Chunk payload target. Smaller chunks keep peak memory proportional to the
 /// thread count instead of exploding with it.
@@ -255,10 +258,11 @@ fn run_producer(
 
     let mut stats = ProducerStats::default();
 
-    // Encoding detection runs on the records of the first chunk instead of
-    // re-opening the file. Re-opening meant a gzip input was inflated twice.
+    // Long-read auto mode already implies Phred+33. For short reads, retain
+    // only a bounded prefix so the compressed input never needs a second pass.
     let fixed_offset = match phred_cfg {
         PhredOffsetConfig::Fixed(v) => Some(v),
+        PhredOffsetConfig::Auto if mode == Mode::Long => Some(33),
         PhredOffsetConfig::Auto => None,
     };
     let mut detect = PhredDetector::new(mode);
@@ -322,7 +326,10 @@ fn run_producer(
         read_index += 1;
 
         if current.bytes.len() >= TARGET_CHUNK_BYTES {
-            if !offset_decided && detect.is_confident() {
+            if !offset_decided
+                && (detect.is_confident()
+                    || stats.bytes + current.bytes.len() as u64 >= AUTO_DETECT_BYTES)
+            {
                 phred_offset = detect.decide();
                 offset_decided = true;
             }
@@ -559,6 +566,40 @@ pub fn peek_max_read_length(path: &Path, reads: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_detection_releases_full_chunks_before_the_read_limit() {
+        use std::io::Write;
+
+        for (mode, min_payload, expected_offset) in [
+            (Mode::Long, TARGET_CHUNK_BYTES, 33),
+            (Mode::Short, AUTO_DETECT_BYTES as usize, 64),
+        ] {
+            let mut input = tempfile::NamedTempFile::new().unwrap();
+            let length = 20_000;
+            let record = format!("@read\n{}\n+\n{}\n", "A".repeat(length), "h".repeat(length));
+            let records_per_chunk = TARGET_CHUNK_BYTES.div_ceil(2 * length);
+            let chunks = min_payload.div_ceil(TARGET_CHUNK_BYTES);
+            for _ in 0..records_per_chunk * chunks {
+                input.write_all(record.as_bytes()).unwrap();
+            }
+            // A parser error prevents EOF from flushing pending chunks.
+            input.write_all(b"@broken\nAA\n+\n!\n").unwrap();
+            input.flush().unwrap();
+            let (tx, rx) = channel::unbounded();
+            let result = run_producer(
+                Input::Path(input.path().to_owned()),
+                PhredOffsetConfig::Auto,
+                mode,
+                tx,
+            );
+            assert!(result.is_err());
+            let first = rx
+                .try_recv()
+                .expect("producer should have published a full chunk");
+            assert_eq!(first.phred_offset, expected_offset);
+        }
+    }
 
     #[test]
     fn low_quality_bytes_mean_phred33() {

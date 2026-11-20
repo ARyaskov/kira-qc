@@ -36,9 +36,11 @@ The producer thread packs `seq||qual` pairs into 2 MiB chunks and parses the
 flowcell tile out of the read header when the header format carries one. Tile
 parsing stops after the first chunk if no read had one.
 
-Encoding detection runs on the records of the first chunk and the result travels
-with every chunk, so the input is read exactly once and workers need no
-synchronisation. Detection defaults to Phred+33 and requires positive evidence
+Short-read auto detection samples the input up to a chunk boundary, with limits
+of 100,000 reads or about 16 MiB of packed reads. Long-read auto mode uses
+Phred+33 immediately. The selected offset travels with every chunk, so the
+input is read once and workers need no synchronisation. Short-read detection
+defaults to Phred+33 and requires positive evidence
 before selecting Phred+64: any byte below `;` rules out Phred+64, and any byte
 above the Phred+64 ceiling rules it out as well, which keeps high-quality
 NovaSeq and PacBio HiFi data from being shifted by 31.

@@ -180,8 +180,8 @@ hashes across 1, 2, 4 and 16 threads.
 
 ## Performance notes
 
-- The input is read exactly once. Quality-encoding detection runs on the first
-  chunk, so a gzip file is never inflated twice.
+- The input is read once. Short-read auto detection buffers an initial sample
+  of up to about 16 MiB of packed reads. Long-read auto uses Phred+33 immediately.
 - Short-read processing makes a single fused pass over sequence and quality that
   fills the per-position accumulators, base composition and mean quality.
 - Chunks are 2 MiB and the producer-worker channel is bounded, so peak memory
