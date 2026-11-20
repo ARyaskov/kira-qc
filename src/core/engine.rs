@@ -172,7 +172,7 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     log.stage("engine.spawn_workers", t_workers);
 
     let t_collect = Instant::now();
-    let mut final_agg = Agg::new(agg_cfg.clone());
+    let mut final_agg: Option<Agg> = None;
     let mut worker_stats_total = WorkerStats::default();
     let mut wait_time = Duration::ZERO;
     let mut merge_time = Duration::ZERO;
@@ -183,10 +183,18 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
         let Ok((agg, stats)) = result else {
             break;
         };
-        let t_merge = Instant::now();
-        final_agg.merge(&agg);
-        merge_time += t_merge.elapsed();
         accumulate_worker_stats(&mut worker_stats_total, &stats);
+        if agg.total_reads == 0 {
+            continue;
+        }
+        if let Some(final_agg) = &mut final_agg {
+            let t_merge = Instant::now();
+            final_agg.merge(&agg);
+            merge_time += t_merge.elapsed();
+        } else {
+            // Reuse the first populated aggregate and its allocated tables.
+            final_agg = Some(agg);
+        }
     }
     log.stage("engine.collect_merge", t_collect);
 
@@ -201,9 +209,9 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
         bail!("{panicked} worker thread(s) panicked; results would be incomplete");
     }
     let meta = producer_result.map_err(|_| anyhow!("FASTQ producer thread panicked"))??;
-    if final_agg.total_reads == 0 {
+    let Some(final_agg) = final_agg else {
         bail!("no FASTQ records found in input");
-    }
+    };
     final_agg.seq_tracker.ensure_complete()?;
 
     let encoding = if meta.phred_offset == 64 {
