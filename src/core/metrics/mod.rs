@@ -860,22 +860,23 @@ impl Agg {
 
         let window_reads = summary.observed_reads.max(1);
         let mut overrep = Vec::new();
-        let mut max_percent = 0.0f64;
-        for (seq, count, _first) in self.seq_tracker.entries_sorted() {
-            let pct = count as f64 * 100.0 / window_reads as f64;
-            if pct > max_percent {
-                max_percent = pct;
-            }
-            if pct >= 0.1 {
+        for (seq, count, _first) in self.seq_tracker.entries() {
+            if u128::from(count) * 1_000 >= u128::from(window_reads) {
                 overrep.push(OverrepRow {
                     sequence: String::from_utf8_lossy(seq).into_owned(),
                     count,
-                    percent: pct,
+                    percent: count as f64 * 100.0 / window_reads as f64,
                     source: self.cfg.contaminants.classify(seq),
                 });
             }
         }
-        let overrep_status = overrepresented::overrep_status(max_percent);
+        overrep.sort_unstable_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.sequence.cmp(&b.sequence))
+        });
+        let overrep_status =
+            overrepresented::overrep_status(overrep.first().map_or(0.0, |row| row.percent));
 
         (
             summary.rows.clone(),

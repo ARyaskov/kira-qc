@@ -209,30 +209,20 @@ impl SeqTracker {
         self.observed_reads += other.observed_reads;
         self.dropped_reads += other.dropped_reads;
 
-        // Use first-seen order within this partial result. A result that
-        // exceeds the cap is rejected before it can be reported.
-        let mut order: Vec<u32> = (0..other.slots.len() as u32).collect();
-        order.sort_unstable_by_key(|&i| {
-            let s = &other.slots[i as usize];
-            (s.first_index, s.hash)
-        });
-
-        for i in order {
-            let s = other.slots[i as usize];
+        for &s in &other.slots {
             self.add_count(other.sequence(s), s.hash, s.count, s.first_index);
         }
     }
 
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&[u8], u64, u64)> {
+        self.slots
+            .iter()
+            .map(|&s| (self.sequence(s), s.count, s.first_index))
+    }
+
     /// `(sequence, count, first_index)` in deterministic order.
     pub fn entries_sorted(&self) -> Vec<(&[u8], u64, u64)> {
-        let mut out: Vec<(&[u8], u64, u64)> = self
-            .slots
-            .iter()
-            .map(|s| {
-                let seq = &self.arena[s.seq_off as usize..s.seq_off as usize + s.seq_len as usize];
-                (seq, s.count, s.first_index)
-            })
-            .collect();
+        let mut out: Vec<_> = self.entries().collect();
         out.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         out
     }
