@@ -37,6 +37,7 @@ aho-corasick = "1"
 svg2pdf = { version = "0.13", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rustc-hash = "2"
+tempfile = "3.27.0"
 
 [profile.release]
 codegen-units = 1

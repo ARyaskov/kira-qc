@@ -235,6 +235,46 @@ fn malformed_input_after_a_full_chunk_fails_the_run() {
 }
 
 #[test]
+fn noextract_preserves_existing_reports_and_rejects_path_sample_names() {
+    use std::process::Command;
+
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("reads.fastq");
+    write_fastq(&input, 10, false);
+    let existing = root.path().join("reads_fastqc");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("summary.txt"), "previous report").unwrap();
+
+    let run_cli = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+            .arg(&input)
+            .args(["--noextract", "--quiet", "-t", "1", "-o"])
+            .arg(root.path())
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let output = run_cli(&[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing.join("summary.txt")).unwrap(),
+        "previous report"
+    );
+    let archive = std::fs::File::open(root.path().join("reads_fastqc.zip")).unwrap();
+    let mut archive = zip::ZipArchive::new(archive).unwrap();
+    assert!(archive.by_name("reads_fastqc/fastqc_data.txt").is_ok());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
+
+    let output = run_cli(&["--sample-name", "../other"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("filename component"));
+}
+
+#[test]
 fn phred_detection_rules() {
     // Modern high-quality Illumina data must not be read as Phred+64.
     assert_eq!(decide_phred_offset(70, 70, 5_000, Mode::Short), 33);

@@ -59,6 +59,15 @@ fn preflight(args: &RunArgs) -> Result<()> {
     if args.sample_name.is_some() && args.reads.len() > 1 {
         bail!("--sample-name cannot be used with more than one input file");
     }
+    if let Some(name) = &args.sample_name
+        && (name.trim().is_empty()
+            || matches!(name.as_str(), "." | "..")
+            || name
+                .chars()
+                .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)))
+    {
+        bail!("--sample-name must be a single valid filename component");
+    }
     if args.no_zip && args.noextract {
         bail!("--no-zip and --noextract together would leave no output");
     }
@@ -117,10 +126,6 @@ fn run_one(
         None if is_stdin => PathBuf::from("."),
         None => reads.parent().unwrap_or(Path::new(".")).to_path_buf(),
     };
-    let out_dir = out_root.join(format!("{}_fastqc", sample_name));
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
-
     let phred_offset = match args.phred_offset {
         PhredOffsetArg::Auto => PhredOffsetConfig::Auto,
         PhredOffsetArg::P33 => PhredOffsetConfig::Fixed(33),
@@ -155,6 +160,23 @@ fn run_one(
     let metrics = output.agg.finalize(&output.ctx);
     log.stage("finalize", t_finalize);
 
+    let temp_dir = if args.noextract {
+        fs::create_dir_all(&out_root)?;
+        Some(
+            tempfile::Builder::new()
+                .prefix(".kira-qc-")
+                .tempdir_in(&out_root)?,
+        )
+    } else {
+        None
+    };
+    let out_dir = temp_dir.as_ref().map_or_else(
+        || out_root.join(format!("{sample_name}_fastqc")),
+        |dir| dir.path().to_owned(),
+    );
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
+
     report::fastqc_txt::write(&out_dir.join("fastqc_data.txt"), &metrics, &output.ctx)?;
     report::summary_txt::write(&out_dir.join("summary.txt"), &metrics, &output.ctx)?;
     report::html::write(&out_dir.join("fastqc_report.html"), &metrics, &output.ctx)?;
@@ -188,14 +210,15 @@ fn run_one(
 
     if !args.no_zip {
         let t_zip = Instant::now();
-        report::zip::write_zip(&out_root, &sample_name, &extra_files)
+        report::zip::write_zip_from(&out_root, &out_dir, &sample_name, &extra_files)
             .with_context(|| "failed to create zip output")?;
         log.stage("zip", t_zip);
     }
 
-    if args.noextract {
-        fs::remove_dir_all(&out_dir)
-            .with_context(|| format!("failed to remove {}", out_dir.display()))?;
+    if let Some(temp_dir) = temp_dir {
+        temp_dir
+            .close()
+            .context("failed to remove temporary report directory")?;
     } else if !args.quiet {
         eprintln!("kira-qc: wrote {}", out_dir.display());
     }

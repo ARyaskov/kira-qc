@@ -18,32 +18,37 @@ pub fn options() -> SimpleFileOptions {
 
 /// Bundle the report directory, mirroring FastQC's `<sample>_fastqc.zip` layout.
 pub fn write_zip(out_dir: &Path, sample_name: &str, extra_files: &[String]) -> Result<()> {
+    let source = out_dir.join(format!("{sample_name}_fastqc"));
+    write_zip_from(out_dir, &source, sample_name, extra_files)
+}
+
+pub(crate) fn write_zip_from(
+    out_dir: &Path,
+    source: &Path,
+    sample_name: &str,
+    extra_files: &[String],
+) -> Result<()> {
     let root = format!("{}_fastqc", sample_name);
     let zip_name = format!("{}_fastqc.zip", sample_name);
     let zip_path = out_dir.join(&zip_name);
-    let tmp_path = out_dir.join(format!("{}.tmp", zip_name));
-
-    let file = File::create(&tmp_path)
-        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-    let mut zip = ZipWriter::new(file);
-    let result = write_zip_entries(&mut zip, out_dir, &root, extra_files);
-
-    match result.and_then(|_| zip.finish().with_context(|| "failed to finalize zip")) {
-        Ok(_) => {
-            fs::rename(&tmp_path, &zip_path)
-                .with_context(|| format!("failed to move zip to {}", zip_path.display()))?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            Err(e)
-        }
-    }
+    let mut temporary = tempfile::NamedTempFile::new_in(out_dir).with_context(|| {
+        format!(
+            "failed to create a temporary archive in {}",
+            out_dir.display()
+        )
+    })?;
+    let mut zip = ZipWriter::new(temporary.as_file_mut());
+    write_zip_entries(&mut zip, source, &root, extra_files)?;
+    zip.finish().context("failed to finalize zip")?;
+    temporary
+        .persist(&zip_path)
+        .with_context(|| format!("failed to publish {}", zip_path.display()))?;
+    Ok(())
 }
 
 fn write_zip_entries(
-    zip: &mut ZipWriter<File>,
-    out_dir: &Path,
+    zip: &mut ZipWriter<&mut File>,
+    source: &Path,
     root: &str,
     extra_files: &[String],
 ) -> Result<()> {
@@ -61,7 +66,7 @@ fn write_zip_entries(
 
     let mut added_dirs: Vec<String> = Vec::new();
     for name in names {
-        let src_path = out_dir.join(root).join(&name);
+        let src_path = source.join(&name);
         if !src_path.is_file() {
             continue;
         }
@@ -86,7 +91,7 @@ fn write_zip_entries(
 }
 
 fn add_file(
-    zip: &mut ZipWriter<File>,
+    zip: &mut ZipWriter<&mut File>,
     src_path: &Path,
     zip_path: &str,
     options: SimpleFileOptions,
