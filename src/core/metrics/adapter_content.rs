@@ -9,6 +9,7 @@
 use crate::core::model::{BaseGroup, Mode, Status};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -72,7 +73,11 @@ impl AdapterSet {
                 MAX_ADAPTERS
             );
         }
+        let mut names = HashSet::with_capacity(adapters.len());
         for a in &adapters {
+            if !names.insert(a.name.as_str()) {
+                bail!("duplicate adapter name '{}'", a.name);
+            }
             if a.probe.is_empty() {
                 bail!("adapter '{}' has an empty sequence", a.name);
             }
@@ -396,6 +401,18 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].0, "Illumina Universal Adapter");
         assert_eq!(parsed[0].1, "AGATCGGAAGAG");
+    }
+
+    #[test]
+    fn rejects_duplicate_names_in_adapter_files() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "shared\tAAAA\nshared\tCCCC\n").unwrap();
+        let error = AdapterSet::from_file(file.path(), false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate adapter name 'shared'")
+        );
     }
 
     #[test]
