@@ -3,7 +3,7 @@
 
 use kira_qc::core::engine::{Input, PhredOffsetConfig, RunConfig, decide_phred_offset, run};
 use kira_qc::core::metrics::{AdapterSet, ContaminantList, DEFAULT_DUP_WINDOW};
-use kira_qc::core::model::{Encoding, Mode};
+use kira_qc::core::model::{Encoding, Mode, Status};
 use kira_qc::report;
 use std::path::{Path, PathBuf};
 
@@ -202,6 +202,33 @@ fn long_mode_reports_exact_n50() {
     assert_eq!(ll.max, 20_000);
     assert_eq!(ll.min, 2_000);
     assert_eq!(ll.total_bases, 42_000);
+}
+
+#[test]
+fn long_mode_n_warning_includes_reads_above_the_higher_threshold() {
+    let path = scratch("long_n_thresholds").join("reads.fastq");
+    let mut input = String::new();
+    for i in 0..100 {
+        let n_count = match i {
+            0..=3 => 26,
+            4..=7 => 11,
+            _ => 0,
+        };
+        input.push_str(&format!(
+            "@read{i}\n{}{}\n+\n{}\n",
+            "N".repeat(n_count),
+            "A".repeat(105 - n_count),
+            "I".repeat(105)
+        ));
+    }
+    std::fs::write(&path, input).unwrap();
+    let output = run(config(&path, 1, Mode::Long)).unwrap();
+    assert_eq!(output.agg.reads_n_gt10, 8);
+    assert_eq!(output.agg.reads_n_gt20, 4);
+    assert_eq!(
+        output.agg.finalize(&output.ctx).statuses.per_seq_n,
+        Status::Warn
+    );
 }
 
 #[test]

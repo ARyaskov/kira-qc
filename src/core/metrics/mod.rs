@@ -348,9 +348,10 @@ impl Agg {
 
         let n_percent = ((n_count * 100) + (len as u64 / 2)) / len as u64;
         self.per_seq_n_hist[n_percent.min(100) as usize] += 1;
-        if n_percent > 20 {
+        if n_count * 100 > len as u64 * 20 {
             self.reads_n_gt20 += 1;
-        } else if n_percent > 10 {
+        }
+        if n_count * 100 > len as u64 * 10 {
             self.reads_n_gt10 += 1;
         }
 
