@@ -82,6 +82,8 @@ pub struct AggConfig {
     pub kmer_enabled: bool,
     /// Reads fed to the duplication estimator; 0 means "every read".
     pub dup_window: u64,
+    pub seq_tracking_enabled: bool,
+    pub adapter_enabled: bool,
     /// Collect per-tile quality when read headers carry tile numbers.
     pub per_tile_enabled: bool,
     pub adapters: Arc<AdapterSet>,
@@ -94,6 +96,8 @@ impl AggConfig {
             mode,
             kmer_enabled: false,
             dup_window: DEFAULT_DUP_WINDOW,
+            seq_tracking_enabled: true,
+            adapter_enabled: true,
             per_tile_enabled: mode == Mode::Short,
             adapters: AdapterSet::default_for(mode),
             contaminants: ContaminantList::builtin(),
@@ -156,7 +160,11 @@ impl Agg {
         } else {
             Vec::new()
         };
-        let stride = cfg.adapters.len();
+        let stride = if cfg.adapter_enabled {
+            cfg.adapters.len()
+        } else {
+            0
+        };
         let adapter_reads_any = vec![0u64; stride];
 
         Self {
@@ -296,14 +304,16 @@ impl Agg {
         self.short_gc.add(gc_model_len, gc_prefix);
 
         let stride = self.adapter_stride;
-        if self.adapter_counts.len() < len * stride {
-            self.adapter_counts.resize(len * stride, 0);
+        if stride != 0 {
+            if self.adapter_counts.len() < len * stride {
+                self.adapter_counts.resize(len * stride, 0);
+            }
+            self.cfg
+                .adapters
+                .scan(read.seq, &mut self.adapter_counts, stride);
         }
-        self.cfg
-            .adapters
-            .scan(read.seq, &mut self.adapter_counts, stride);
 
-        if self.in_dup_window(read_index) {
+        if self.cfg.seq_tracking_enabled && self.in_dup_window(read_index) {
             self.seq_tracker.add(read.seq, read_index);
         }
 
@@ -362,8 +372,11 @@ impl Agg {
             self.reads_n_gt10 += 1;
         }
 
-        let mut hits = [false; MAX_ADAPTERS];
         let n_adapters = self.adapter_stride;
+        if n_adapters == 0 {
+            return;
+        }
+        let mut hits = [false; MAX_ADAPTERS];
         self.cfg
             .adapters
             .scan_any(read.seq, &mut hits[..n_adapters]);

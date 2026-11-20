@@ -774,3 +774,41 @@ fn latex_uses_active_modules_for_both_export_modes() {
         assert!(!latex.join("tables/basic_statistics.tex").exists());
     }
 }
+
+#[test]
+fn ignored_expensive_modules_skip_collection_and_keep_other_metrics() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("reads.fastq");
+    std::fs::write(
+        &input,
+        b"@MK:1:FLOW:1:1001:1:1\nAAAAAAAAAAAA\n+\n555555555555\n",
+    )
+    .unwrap();
+    let baseline = run(config(&input, 2, Mode::Short)).unwrap();
+    assert!(baseline.agg.per_tile.is_available());
+    assert!(!baseline.agg.adapter_counts.is_empty());
+    assert!(!baseline.agg.seq_tracker.is_empty());
+
+    let mut cfg = config(&input, 2, Mode::Short);
+    cfg.ignored_modules = ["tile", "adapter", "duplication", "overrepresented"]
+        .map(|key| report::resolve_limits_key(key).unwrap().to_owned())
+        .to_vec();
+    let ignored = cfg.ignored_modules.clone();
+    let result = run(cfg).unwrap();
+    assert!(!result.agg.per_tile.is_available());
+    assert!(result.agg.adapter_counts.is_empty());
+    assert!(result.agg.seq_tracker.is_empty());
+
+    let render = |agg: &kira_qc::core::metrics::Agg,
+                  ctx: &kira_qc::core::model::FinalizeContext| {
+        let mut bytes = Vec::new();
+        report::fastqc_txt::write_to(&mut bytes, &agg.finalize(ctx), ctx).unwrap();
+        bytes
+    };
+    let mut ctx = baseline.ctx;
+    ctx.ignored_modules = ignored;
+    assert_eq!(
+        render(&baseline.agg, &ctx),
+        render(&result.agg, &result.ctx)
+    );
+}

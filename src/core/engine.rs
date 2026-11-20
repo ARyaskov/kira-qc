@@ -139,22 +139,38 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     let threads = cfg.threads.max(1);
     let (chunk_tx, chunk_rx) = channel::bounded::<PackedChunk>(CHANNEL_SLACK);
     let (result_tx, result_rx) = channel::bounded::<(Agg, WorkerStats)>(threads);
-    let producer_input = cfg.input.clone();
-    let phred_cfg = cfg.phred_offset;
-    let mode = cfg.mode;
-    let stats_enabled = log.enabled();
-    let producer = thread::spawn(move || {
-        run_producer(producer_input, phred_cfg, mode, chunk_tx, stats_enabled)
-    });
-
+    let enabled = |module: crate::report::ModuleId| {
+        !cfg.ignored_modules
+            .iter()
+            .any(|name| name == module.anchor())
+    };
+    use crate::report::ModuleId;
     let agg_cfg = AggConfig {
         mode: cfg.mode,
-        kmer_enabled: cfg.kmer_enabled && cfg.mode == Mode::Short,
+        kmer_enabled: cfg.kmer_enabled && cfg.mode == Mode::Short && enabled(ModuleId::KmerContent),
         dup_window: cfg.dup_window,
-        per_tile_enabled: cfg.mode == Mode::Short,
+        seq_tracking_enabled: enabled(ModuleId::Duplication) || enabled(ModuleId::Overrepresented),
+        per_tile_enabled: cfg.mode == Mode::Short && enabled(ModuleId::PerTile),
+        adapter_enabled: enabled(ModuleId::AdapterContent),
         adapters: cfg.adapters.clone(),
         contaminants: cfg.contaminants.clone(),
     };
+    let producer_input = cfg.input.clone();
+    let phred_cfg = cfg.phred_offset;
+    let mode = cfg.mode;
+    let per_tile_enabled = agg_cfg.per_tile_enabled;
+    let stats_enabled = log.enabled();
+    let producer = thread::spawn(move || {
+        run_producer(
+            producer_input,
+            phred_cfg,
+            mode,
+            per_tile_enabled,
+            chunk_tx,
+            stats_enabled,
+        )
+    });
+
     let kmer_enabled = agg_cfg.kmer_enabled;
 
     let mut workers = Vec::with_capacity(threads);
@@ -266,6 +282,7 @@ fn run_producer(
     input: Input,
     phred_cfg: PhredOffsetConfig,
     mode: Mode,
+    per_tile_enabled: bool,
     chunk_tx: channel::Sender<PackedChunk>,
     stats_enabled: bool,
 ) -> Result<ProducerMeta> {
@@ -285,7 +302,7 @@ fn run_producer(
     let mut offset_decided = fixed_offset.is_some();
 
     // Tile parsing stops as soon as the first chunk shows there are no tiles.
-    let mut parse_tiles = mode == Mode::Short;
+    let mut parse_tiles = per_tile_enabled;
     let mut tiles_seen = false;
 
     let mut read_index: u64 = 0;
@@ -608,6 +625,7 @@ mod tests {
                 Input::Path(input.path().to_owned()),
                 PhredOffsetConfig::Auto,
                 mode,
+                mode == Mode::Short,
                 tx,
                 false,
             );
