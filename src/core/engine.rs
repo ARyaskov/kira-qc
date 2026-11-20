@@ -142,7 +142,10 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     let producer_input = cfg.input.clone();
     let phred_cfg = cfg.phred_offset;
     let mode = cfg.mode;
-    let producer = thread::spawn(move || run_producer(producer_input, phred_cfg, mode, chunk_tx));
+    let stats_enabled = log.enabled();
+    let producer = thread::spawn(move || {
+        run_producer(producer_input, phred_cfg, mode, chunk_tx, stats_enabled)
+    });
 
     let agg_cfg = AggConfig {
         mode: cfg.mode,
@@ -159,7 +162,6 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     for _ in 0..threads {
         let rx = chunk_rx.clone();
         let tx = result_tx.clone();
-        let stats_enabled = log.enabled();
         let worker_cfg = agg_cfg.clone();
         workers.push(thread::spawn(move || {
             run_worker(rx, tx, worker_cfg, stats_enabled);
@@ -257,6 +259,7 @@ fn run_producer(
     phred_cfg: PhredOffsetConfig,
     mode: Mode,
     chunk_tx: channel::Sender<PackedChunk>,
+    stats_enabled: bool,
 ) -> Result<ProducerMeta> {
     let mut reader = open_reader(&input)?;
 
@@ -282,14 +285,16 @@ fn run_producer(
     let mut pending: Vec<PackedChunk> = Vec::new();
 
     loop {
-        let t_next = Instant::now();
+        let t_next = stats_enabled.then(Instant::now);
         let Some(rec) = reader
             .next()
             .map_err(|e| anyhow!("FASTQ parse/read error at read {}: {e:?}", read_index + 1))?
         else {
             break;
         };
-        stats.parse += t_next.elapsed();
+        if let Some(start) = t_next {
+            stats.parse += start.elapsed();
+        }
 
         let seq = rec.seq();
         let qual = rec.qual();
@@ -596,6 +601,7 @@ mod tests {
                 PhredOffsetConfig::Auto,
                 mode,
                 tx,
+                false,
             );
             assert!(result.is_err());
             let first = rx

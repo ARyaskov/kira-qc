@@ -184,13 +184,13 @@ pub fn parse_tile(header: &[u8]) -> Option<u32> {
     let name = &header[..end];
     let name = name.strip_prefix(b"@").unwrap_or(name);
 
-    let fields: Vec<&[u8]> = name.split(|&b| b == b':').collect();
-    let field = if fields.len() >= 7 {
-        fields[4]
-    } else if fields.len() == 5 {
-        fields[2]
-    } else {
-        return None;
+    let mut fields = name.split(|&b| b == b':');
+    let legacy_tile = fields.nth(2)?;
+    let modern_tile = fields.nth(1)?;
+    let field = match (fields.next(), fields.next()) {
+        (None, None) => legacy_tile,
+        (Some(_), Some(_)) => modern_tile,
+        _ => return None,
     };
 
     if field.is_empty() || !field.iter().all(|b| b.is_ascii_digit()) {
@@ -226,6 +226,13 @@ mod tests {
     fn rejects_non_numeric_tile() {
         let h = b"@a:b:c:d:tile:f:g";
         assert_eq!(parse_tile(h), None);
+    }
+
+    #[test]
+    fn parses_extended_headers_and_rejects_six_field_names() {
+        assert_eq!(parse_tile(b"@a:b:c:d:101:42:43:extra"), Some(101));
+        assert_eq!(parse_tile(b"@a:b:100:d:101:42"), None);
+        assert_eq!(parse_tile(b"@a:b:c:d:4294967296:42:43"), None);
     }
 
     #[test]
