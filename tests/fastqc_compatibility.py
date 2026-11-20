@@ -75,6 +75,21 @@ def verify_gc(binary, fastqc, root):
                     sections(root / "gc_fastqc.zip", "gc")[module], 1, 1e-9)
 
 
+def verify_tiles(binary, fastqc, root):
+    sample = root / "tiles.fastq"
+    with sample.open("wb") as out:
+        for tile, count, quality in [(1001, 900, b"?"), (1002, 100, b"3")]:
+            for i in range(count):
+                out.write(f"@MK:1:FLOW:1:{tile}:{i}:1\n".encode()
+                          + b"ACGT" * 10 + b"\n+\n" + quality * 40 + b"\n")
+    expected = reference_report(fastqc, sample, root / "tile-reference")
+    run(str(binary), str(sample), "--quiet", "-o", str(root))
+    module = "Per tile sequence quality"
+    actual = sections(root / "tiles_fastqc.zip", "tiles")[module]
+    assert actual[0] == "warn"
+    compare_section(sections(expected, "tiles")[module], actual, 2, 0.005)
+
+
 def verify(binary, fastqc, root):
     sample = root / "oracle.fastq"
     sequence = b"GCNN" + b"ACGT" * 24
@@ -139,4 +154,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with TemporaryDirectory() as temp:
         verify_gc(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
+        verify_tiles(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
         verify(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))

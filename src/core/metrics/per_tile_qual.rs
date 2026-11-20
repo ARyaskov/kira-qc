@@ -111,58 +111,40 @@ impl PerTileQual {
             return (rows, status);
         }
 
-        let max_pos = self.tiles.values().map(|a| a.sum.len()).max().unwrap_or(0);
-        if max_pos == 0 {
-            return (rows, status);
-        }
-
-        // Overall mean quality at each position, across every tile.
-        let mut total_sum = vec![0u64; max_pos];
-        let mut total_count = vec![0u64; max_pos];
-        for acc in self.tiles.values() {
-            for i in 0..acc.sum.len() {
-                total_sum[i] += acc.sum[i];
-                total_count[i] += acc.count[i];
-            }
-        }
-
         let mut tile_ids: Vec<u32> = self.tiles.keys().copied().collect();
         tile_ids.sort_unstable();
-
+        let mut group_means = vec![0.0; groups.len()];
         for tile in tile_ids {
             let acc = &self.tiles[&tile];
-            for g in groups {
-                let range = g.range();
-                let mut tile_sum = 0u64;
-                let mut tile_count = 0u64;
-                let mut all_sum = 0u64;
-                let mut all_count = 0u64;
-                for i in range {
-                    if i >= max_pos {
-                        break;
+            for (i, &group) in groups.iter().enumerate() {
+                let mut sum = 0.0;
+                let mut covered = 0;
+                for position in group.range().take_while(|&pos| pos < acc.sum.len()) {
+                    let count = acc.count[position];
+                    if count > 0 {
+                        sum += acc.sum[position] as f64 / count as f64;
+                        covered += 1;
                     }
-                    if i < acc.sum.len() {
-                        tile_sum += acc.sum[i];
-                        tile_count += acc.count[i];
-                    }
-                    all_sum += total_sum[i];
-                    all_count += total_count[i];
                 }
-                if tile_count == 0 || all_count == 0 {
-                    continue;
-                }
-                let deviation =
-                    tile_sum as f64 / tile_count as f64 - all_sum as f64 / all_count as f64;
-                if deviation.abs() > 10.0 {
-                    status = Status::Fail;
-                } else if deviation.abs() > 5.0 && status != Status::Fail {
-                    status = Status::Warn;
-                }
+                let mean = if covered == 0 {
+                    0.0
+                } else {
+                    sum / covered as f64
+                };
+                group_means[i] += mean;
                 rows.push(PerTileRow {
                     tile,
-                    group: *g,
-                    mean_deviation: deviation,
+                    group,
+                    mean_deviation: mean,
                 });
+            }
+        }
+        for (row, total) in rows.iter_mut().zip(group_means.iter().cycle()) {
+            row.mean_deviation -= total / self.tiles.len() as f64;
+            if row.mean_deviation.abs() > 10.0 {
+                status = Status::Fail;
+            } else if row.mean_deviation.abs() > 5.0 && status != Status::Fail {
+                status = Status::Warn;
             }
         }
 
