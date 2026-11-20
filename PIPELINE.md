@@ -73,6 +73,12 @@ per-read quality histogram, from which the mean error probability is derived.
 - **K-mer Content** is opt-in and uses a rolling 2-bit encoding over ten
   positional bins.
 
+With `KIRA_STATS=1`, `producer.elapsed` includes opening the input, reading,
+packing and sending chunks. `producer.parse` measures calls to the reader,
+including decompression, and `producer.send` measures channel sends, including
+waiting for space in the queue. `worker.receive` and `worker.process` are sums
+across all worker threads, so they can exceed the elapsed pipeline time.
+
 ### 5) Deterministic reduction
 **Input:** per-worker aggregates
 **Output:** merged aggregate

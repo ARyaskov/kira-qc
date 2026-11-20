@@ -108,6 +108,8 @@ struct ProducerStats {
     bytes: u64,
     reads: u64,
     parse: Duration,
+    send: Duration,
+    elapsed: Duration,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -116,6 +118,7 @@ struct WorkerStats {
     bytes: u64,
     reads: u64,
     process: Duration,
+    receive: Duration,
     kmer: Duration,
     kmer_updates: u64,
 }
@@ -286,6 +289,7 @@ fn run_producer(
     chunk_tx: channel::Sender<PackedChunk>,
     stats_enabled: bool,
 ) -> Result<ProducerMeta> {
+    let t_producer = stats_enabled.then(Instant::now);
     let mut reader = open_reader(&input)?;
 
     let mut stats = ProducerStats::default();
@@ -377,12 +381,10 @@ fn run_producer(
             if offset_decided {
                 for mut queued in pending.drain(..) {
                     queued.phred_offset = phred_offset;
-                    chunk_tx
-                        .send(queued)
-                        .context("FASTQ workers disconnected")?;
+                    send_chunk(&chunk_tx, queued, stats_enabled, &mut stats.send)?;
                 }
                 chunk.phred_offset = phred_offset;
-                chunk_tx.send(chunk).context("FASTQ workers disconnected")?;
+                send_chunk(&chunk_tx, chunk, stats_enabled, &mut stats.send)?;
             } else {
                 // Hold the chunk back until enough quality bytes have been seen
                 // to pick an encoding.
@@ -408,15 +410,30 @@ fn run_producer(
 
     for mut queued in pending.drain(..) {
         queued.phred_offset = phred_offset;
-        chunk_tx
-            .send(queued)
-            .context("FASTQ workers disconnected")?;
+        send_chunk(&chunk_tx, queued, stats_enabled, &mut stats.send)?;
     }
 
+    if let Some(start) = t_producer {
+        stats.elapsed = start.elapsed();
+    }
     Ok(ProducerMeta {
         producer: stats,
         phred_offset,
     })
+}
+
+fn send_chunk(
+    tx: &channel::Sender<PackedChunk>,
+    chunk: PackedChunk,
+    stats_enabled: bool,
+    elapsed: &mut Duration,
+) -> Result<()> {
+    let start = stats_enabled.then(Instant::now);
+    tx.send(chunk).context("FASTQ workers disconnected")?;
+    if let Some(start) = start {
+        *elapsed += start.elapsed();
+    }
+    Ok(())
 }
 
 /// Quality-encoding detector.
@@ -498,8 +515,12 @@ fn run_worker(
     let mut agg = Agg::new(cfg);
     let mut wstats = WorkerStats::default();
 
+    let mut receive_start = stats_enabled.then(Instant::now);
     for chunk in rx.iter() {
         let t_start = Instant::now();
+        if let Some(start) = receive_start {
+            wstats.receive += t_start.duration_since(start);
+        }
         wstats.chunks += 1;
         wstats.bytes += chunk.bytes.len() as u64;
         wstats.reads += chunk.offsets.len() as u64;
@@ -523,6 +544,10 @@ fn run_worker(
         }
 
         wstats.process += t_start.elapsed();
+        receive_start = stats_enabled.then(Instant::now);
+    }
+    if let Some(start) = receive_start {
+        wstats.receive += start.elapsed();
     }
 
     let _ = tx.send((agg, wstats));
@@ -546,6 +571,7 @@ fn accumulate_worker_stats(total: &mut WorkerStats, ws: &WorkerStats) {
     total.bytes += ws.bytes;
     total.reads += ws.reads;
     total.process += ws.process;
+    total.receive += ws.receive;
     total.kmer += ws.kmer;
     total.kmer_updates += ws.kmer_updates;
 }
@@ -559,20 +585,23 @@ fn emit_stats(
     if prod.chunks > 0 {
         let avg = prod.bytes as f64 / prod.chunks as f64;
         eprintln!(
-            "KIRA_STATS producer.chunks={} producer.avg_chunk_bytes={:.0} producer.bytes={} producer.reads={} producer.parse={}",
+            "KIRA_STATS producer.chunks={} producer.avg_chunk_bytes={:.0} producer.bytes={} producer.reads={} producer.parse={} producer.send={} producer.elapsed={}",
             prod.chunks,
             avg,
             prod.bytes,
             prod.reads,
             fmt_dur(prod.parse),
+            fmt_dur(prod.send),
+            fmt_dur(prod.elapsed),
         );
     }
     eprintln!(
-        "KIRA_STATS worker.chunks={} worker.bytes={} worker.reads={} worker.process={} worker.kmer={} worker.kmer_updates={}",
+        "KIRA_STATS worker.chunks={} worker.bytes={} worker.reads={} worker.process={} worker.receive={} worker.kmer={} worker.kmer_updates={}",
         workers.chunks,
         workers.bytes,
         workers.reads,
         fmt_dur(workers.process),
+        fmt_dur(workers.receive),
         fmt_dur(workers.kmer),
         workers.kmer_updates,
     );
