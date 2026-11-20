@@ -48,7 +48,7 @@ fn write_body(
         ModuleId::PerBaseN => write_per_base_n(w, metrics),
         ModuleId::PerSeqN => write_per_seq_n(w, metrics),
         ModuleId::LengthDist => write_length_dist(w, metrics, ctx),
-        ModuleId::Duplication => write_duplication(w, metrics, ctx),
+        ModuleId::Duplication => write_duplication(w, metrics),
         ModuleId::Overrepresented => write_overrep(w, metrics),
         ModuleId::AdapterContent => write_adapter_content(w, metrics, ctx),
         ModuleId::KmerContent => write_kmer_content(w, metrics),
@@ -190,11 +190,7 @@ fn write_length_dist(
     Ok(())
 }
 
-fn write_duplication(
-    w: &mut dyn Write,
-    metrics: &FinalMetrics,
-    ctx: &FinalizeContext,
-) -> Result<()> {
+fn write_duplication(w: &mut dyn Write, metrics: &FinalMetrics) -> Result<()> {
     let Some(ref summary) = metrics.duplication_summary else {
         writeln!(
             w,
@@ -210,13 +206,6 @@ fn write_duplication(
         "#Total Deduplicated Percentage\t{:.4}",
         summary.total_deduplicated_percent
     )?;
-    if !ctx.dup_window_complete {
-        writeln!(
-            w,
-            "#Estimated from the first {} reads",
-            ctx.dup_window_reads
-        )?;
-    }
     writeln!(
         w,
         "#Duplication Level\tPercentage of deduplicated\tPercentage of total"

@@ -108,6 +108,32 @@ fn report_is_multiqc_parseable() {
 }
 
 #[test]
+fn partial_duplication_window_keeps_fastqc_headers_tabular() {
+    let path = scratch("partial_dup_window").join("reads.fastq");
+    write_fastq(&path, 11, false);
+    let mut cfg = config(&path, 1, Mode::Short);
+    cfg.dup_window = 10;
+    let output = run(cfg).unwrap();
+    assert!(!output.ctx.dup_window_complete);
+    let metrics = output.agg.finalize(&output.ctx);
+    let mut txt = Vec::new();
+    report::fastqc_txt::write_to(&mut txt, &metrics, &output.ctx).unwrap();
+    let txt = String::from_utf8(txt).unwrap();
+    let start = txt.find(">>Sequence Duplication Levels\t").unwrap();
+    let section = txt[start..].split(">>END_MODULE").next().unwrap();
+    assert!(section.contains("#Total Deduplicated Percentage\t"));
+    for header in section.lines().filter(|line| line.starts_with('#')) {
+        assert!(
+            header.split('\t').count() >= 2,
+            "invalid column header: {header}"
+        );
+    }
+    let json = report::json::render(&metrics, &output.ctx);
+    assert!(json.contains("\"reads_analysed\": 10"));
+    assert!(json.contains("\"whole_file\": false"));
+}
+
+#[test]
 fn per_tile_module_appears_only_with_illumina_headers() {
     let dir = scratch("per_tile");
 
