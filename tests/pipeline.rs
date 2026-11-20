@@ -145,6 +145,21 @@ fn basic_gc_uses_called_bases_and_truncates_like_fastqc() {
 }
 
 #[test]
+fn adapter_content_includes_ambiguous_bases_in_position_coverage() {
+    let path = scratch("adapter_ambiguous").join("reads.fastq");
+    std::fs::write(
+        &path,
+        "@one\nAGATCGGAAGAGR\n+\nIIIIIIIIIIIII\n@two\nAGATCGGAAGAGA\n+\nIIIIIIIIIIIII\n",
+    )
+    .unwrap();
+    let mut cfg = config(&path, 1, Mode::Short);
+    cfg.nogroup = true;
+    let output = run(cfg).unwrap();
+    let metrics = output.agg.finalize(&output.ctx);
+    assert_eq!(metrics.adapter_content.last().unwrap().values[0], 100.0);
+}
+
+#[test]
 fn per_tile_module_appears_only_with_illumina_headers() {
     let dir = scratch("per_tile");
 

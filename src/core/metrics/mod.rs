@@ -440,9 +440,20 @@ impl Agg {
 
     /// Number of reads that reach each 0-based position.
     fn reads_reaching(&self, positions: usize) -> Vec<u64> {
-        (0..positions)
-            .map(|i| self.per_pos_base.get(i).map(|bc| bc.total()).unwrap_or(0))
-            .collect()
+        let mut lengths = self.length_hist.iter_sorted().into_iter().rev().peekable();
+        let mut reaching = vec![0; positions];
+        let mut count = 0;
+        for (position, value) in reaching.iter_mut().enumerate().rev() {
+            while let Some(&(length, reads)) = lengths.peek() {
+                if length <= position as u64 {
+                    break;
+                }
+                count += reads;
+                lengths.next();
+            }
+            *value = count;
+        }
+        reaching
     }
 
     pub fn finalize(&self, ctx: &FinalizeContext) -> FinalMetrics {
