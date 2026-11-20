@@ -17,6 +17,21 @@ mod real {
     /// Report threshold on observed/expected ratio.
     const OBS_EXP_WARN: f64 = 3.0;
     const OBS_EXP_FAIL: f64 = 5.0;
+    const SIGNIFICANCE: f64 = 0.05;
+
+    /// Bonferroni-adjusted upper bound for enrichment under random placement
+    /// of the observed occurrences across positions, conditional on their total.
+    fn adjusted_enrichment_bound(obs: u64, trials: u64, frequency: f64) -> f64 {
+        let observed = obs as f64 / trials as f64;
+        if observed <= frequency {
+            return 1.0;
+        }
+        let mut divergence = observed * (observed / frequency).ln();
+        if observed < 1.0 {
+            divergence += (1.0 - observed) * ((1.0 - observed) / (1.0 - frequency)).ln();
+        }
+        ((-(trials as f64) * divergence).exp() * (KMER_SPACE * BINS) as f64).min(1.0)
+    }
 
     #[derive(Clone, Debug)]
     pub struct KmerRow {
@@ -304,12 +319,15 @@ mod real {
                 }
             }
             if max_obs >= OBS_EXP_WARN {
+                let p_value = adjusted_enrichment_bound(max_bin_obs, bin_counts[max_bin], expected);
+                if p_value > SIGNIFICANCE {
+                    continue;
+                }
                 if max_obs >= OBS_EXP_FAIL {
                     status = Status::Fail;
                 } else if status != Status::Fail {
                     status = Status::Warn;
                 }
-                let p_value = binomial_upper_tail(max_bin_obs, bin_counts[max_bin], expected);
                 rows.push(KmerRow {
                     sequence: decode_kmer(key),
                     count: total_for_key,
@@ -326,6 +344,23 @@ mod real {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn singleton_is_ignored_but_repeated_enrichment_fails() {
+            use crate::core::model::Status;
+            let mut bins: Vec<_> = (0..BINS).map(|_| BinCounts::new()).collect();
+            bins[0].add(0);
+            let (rows, status) = build_rows(&bins, &[1_000; BINS], 10_000, 100);
+            assert!(rows.is_empty());
+            assert_eq!(status, Status::Pass);
+            for _ in 0..99 {
+                bins[0].add(0);
+            }
+            let (rows, status) = build_rows(&bins, &[1_000; BINS], 10_000, 100);
+            assert_eq!(status, Status::Fail);
+            assert_eq!(rows[0].count, 100);
+            assert!(rows[0].p_value < SIGNIFICANCE);
+        }
 
         #[test]
         fn erfc_matches_known_values() {

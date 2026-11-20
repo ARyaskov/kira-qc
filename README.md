@@ -170,6 +170,9 @@ Known differences:
   unsupported rather than silently dropped.
 - BAM, CRAM and SAM are not read natively. Pipe them through `samtools fastq`.
 - Long-read mode is deliberately not FastQC-compatible.
+- Optional K-mer Content flags positional enrichment when the observed-to-expected
+  ratio reaches 3 for a warning or 5 for a failure and the adjusted probability
+  bound is at most 0.05 under the random-placement model.
 
 ## Determinism and reproducibility
 

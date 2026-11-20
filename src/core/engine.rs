@@ -121,6 +121,9 @@ struct WorkerStats {
 }
 
 pub fn run(cfg: RunConfig) -> Result<RunOutput> {
+    if cfg!(feature = "no-kmer") && cfg.kmer_enabled {
+        bail!("K-mer analysis is unavailable in builds with the no-kmer feature");
+    }
     let log = StatsLog::from_env();
     let t_total = Instant::now();
 

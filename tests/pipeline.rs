@@ -194,6 +194,17 @@ fn kmer_module_is_off_by_default() {
     assert!(!text.contains(">>Kmer Content"));
 }
 
+#[cfg(feature = "no-kmer")]
+#[test]
+fn requesting_kmers_without_the_module_fails() {
+    let path = scratch("kmer_disabled").join("reads.fastq");
+    write_fastq(&path, 10, false);
+    let mut cfg = config(&path, 1, Mode::Short);
+    cfg.kmer_enabled = true;
+    let error = run(cfg).err().expect("unavailable analysis must fail");
+    assert!(error.to_string().contains("no-kmer"));
+}
+
 #[test]
 fn long_mode_reports_exact_n50() {
     let dir = scratch("long_mode");

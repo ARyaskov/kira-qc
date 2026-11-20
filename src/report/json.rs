@@ -399,6 +399,8 @@ fn num(v: f64) -> String {
     }
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
+    } else if v.abs() < 1e-6 {
+        format!("{v:.6e}")
     } else {
         format!("{:.6}", v)
     }
@@ -422,5 +424,6 @@ mod tests {
         assert_eq!(num(f64::INFINITY), "null");
         assert_eq!(num(3.0), "3");
         assert_eq!(num(2.5), "2.500000");
+        assert_eq!(num(1e-10), "1.000000e-10");
     }
 }
