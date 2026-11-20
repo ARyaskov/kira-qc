@@ -146,7 +146,7 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
     if modules.contains(&ModuleId::PerSeqGc) {
         array_of_objects(&mut o, 1, "per_sequence_gc", &metrics.per_seq_gc, |o, r| {
             kv_num(o, 3, "gc_percent", r.gc as f64, true);
-            kv_num(o, 3, "count", r.count as f64, false);
+            kv_num(o, 3, "count", r.count, false);
         });
     }
 

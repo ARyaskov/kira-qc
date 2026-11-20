@@ -42,6 +42,39 @@ def multiqc(root, archives):
     return {row["Sample"]: row for row in rows}
 
 
+def reference_report(fastqc, sample, reference):
+    reference.mkdir()
+    run(
+        "java", "-Djava.awt.headless=true", "-Dfastqc.quiet=true",
+        f"-Dfastqc.output_dir={reference}", "-cp", f"{fastqc}{os.pathsep}{fastqc / '*'}",
+        "uk.ac.babraham.FastQC.FastQCApplication", str(sample),
+    )
+    return reference / f"{sample.stem}_fastqc.zip"
+
+
+def compare_section(expected, actual, columns, tolerance):
+    assert actual[0] == expected[0], (expected[0], actual[0])
+    for lhs, rhs in zip(expected[1][1:], actual[1][1:], strict=True):
+        assert lhs[:columns] == rhs[:columns], (lhs, rhs)
+        for a, b in zip(map(float, lhs[columns:]), map(float, rhs[columns:]), strict=True):
+            assert math.isclose(a, b, rel_tol=0, abs_tol=tolerance), (lhs, rhs)
+
+
+def verify_gc(binary, fastqc, root):
+    sample = root / "gc.fastq"
+    with sample.open("wb") as out:
+        for i, seq in enumerate([b"A" * 100 + b"G" * 50] * 20 +
+                                [b"G" * 21 + b"A" * 30] * 80 +
+                                [b"G" * 24 + b"A" * 27] * 150 +
+                                [b"G" * 29 + b"A" * 22] * 35):
+            out.write(f"@read{i}\n".encode() + seq + b"\n+\n" + b"5" * len(seq) + b"\n")
+    expected = reference_report(fastqc, sample, root / "gc-reference")
+    run(str(binary), str(sample), "--quiet", "-o", str(root))
+    module = "Per sequence GC content"
+    compare_section(sections(expected, "gc")[module],
+                    sections(root / "gc_fastqc.zip", "gc")[module], 1, 1e-9)
+
+
 def verify(binary, fastqc, root):
     sample = root / "oracle.fastq"
     sequence = b"GCNN" + b"ACGT" * 24
@@ -53,12 +86,7 @@ def verify(binary, fastqc, root):
     records.append(b"@MK:1:FLOW:1:1001:120:1\n" + sequence + b"A\n+\n" + quality + b"!\n")
     sample.write_bytes(b"".join(records))
     reference = root / "reference"
-    reference.mkdir()
-    run(
-        "java", "-Djava.awt.headless=true", "-Dfastqc.quiet=true",
-        f"-Dfastqc.output_dir={reference}", "-cp", f"{fastqc}{os.pathsep}{fastqc / '*'}",
-        "uk.ac.babraham.FastQC.FastQCApplication", str(sample),
-    )
+    reference_report(fastqc, sample, reference)
     candidate = root / "candidate"
     options = ["--dup-window", "10", "--noextract", "--json", "--quiet",
                "-t", "2", "--outdir", str(candidate)]
@@ -110,4 +138,5 @@ if __name__ == "__main__":
     parser.add_argument("fastqc_directory", type=Path)
     args = parser.parse_args()
     with TemporaryDirectory() as temp:
+        verify_gc(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
         verify(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))

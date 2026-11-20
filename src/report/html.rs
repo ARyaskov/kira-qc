@@ -452,7 +452,7 @@ fn per_seq_gc(out: &mut String, metrics: &FinalMetrics) -> Result<()> {
     let data: Vec<(f64, f64)> = metrics
         .per_seq_gc
         .iter()
-        .map(|r| (r.gc as f64, r.count as f64))
+        .map(|r| (r.gc as f64, r.count))
         .collect();
     svg_bars_xbands(
         out,
@@ -468,7 +468,7 @@ fn per_seq_gc(out: &mut String, metrics: &FinalMetrics) -> Result<()> {
     table(out, "Data", |o| {
         writeln!(o, "<tr><th>GC%</th><th>Count</th></tr>")?;
         for r in &metrics.per_seq_gc {
-            writeln!(o, "<tr><td>{}</td><td>{}</td></tr>", r.gc, fmt_int(r.count))?;
+            writeln!(o, "<tr><td>{}</td><td>{}</td></tr>", r.gc, r.count)?;
         }
         Ok(())
     })
@@ -1690,7 +1690,7 @@ pub(crate) fn latex_svg_per_seq_gc(metrics: &FinalMetrics) -> Result<String> {
     let data: Vec<(f64, f64)> = metrics
         .per_seq_gc
         .iter()
-        .map(|r| (r.gc as f64, r.count as f64))
+        .map(|r| (r.gc as f64, r.count))
         .collect();
     let mut s = String::new();
     svg_bars_xbands(

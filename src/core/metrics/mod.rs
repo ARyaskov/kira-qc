@@ -120,6 +120,7 @@ pub struct Agg {
     pub per_pos_base: Vec<BaseCounts>,
     pub per_seq_mean_q_hist: Vec<u64>,
     pub per_seq_gc_hist: [u64; 101],
+    short_gc: per_seq_gc::ShortGc,
     pub per_seq_n_hist: [u64; 101],
     pub reads_n_gt10: u64,
     pub reads_n_gt20: u64,
@@ -170,6 +171,7 @@ impl Agg {
             per_pos_base: Vec::new(),
             per_seq_mean_q_hist: vec![0u64; MAX_Q + 1],
             per_seq_gc_hist: [0u64; 101],
+            short_gc: per_seq_gc::ShortGc::default(),
             per_seq_n_hist: [0u64; 101],
             reads_n_gt10: 0,
             reads_n_gt20: 0,
@@ -249,6 +251,8 @@ impl Agg {
         let per_pos_base = &mut self.per_pos_base[..len];
         let per_pos_qual = &mut self.per_pos_qual[..len];
 
+        let gc_model_len = per_seq_gc::model_length(len);
+        let mut gc_prefix = 0;
         let mut gc: u64 = 0;
         let mut n_count: u64 = 0;
         let mut sum_q: u64 = 0;
@@ -273,6 +277,10 @@ impl Agg {
                 _ => {}
             }
 
+            if i + 1 == gc_model_len {
+                gc_prefix = gc as usize;
+            }
+
             let q = (qual[i].saturating_sub(phred_offset) as usize).min(MAX_Q);
             per_pos_qual[i][q] += 1;
             sum_q += q as u64;
@@ -285,8 +293,7 @@ impl Agg {
         let mean_q = sum_q / len as u64;
         self.per_seq_mean_q_hist[(mean_q as usize).min(MAX_Q)] += 1;
 
-        let gc_percent = ((gc * 100) + (len as u64 / 2)) / len as u64;
-        self.per_seq_gc_hist[(gc_percent as usize).min(100)] += 1;
+        self.short_gc.add(gc_model_len, gc_prefix);
 
         let stride = self.adapter_stride;
         if self.adapter_counts.len() < len * stride {
@@ -400,6 +407,7 @@ impl Agg {
         for i in 0..self.per_seq_mean_q_hist.len() {
             self.per_seq_mean_q_hist[i] += other.per_seq_mean_q_hist[i];
         }
+        self.short_gc.merge(&other.short_gc);
         for i in 0..self.per_seq_gc_hist.len() {
             self.per_seq_gc_hist[i] += other.per_seq_gc_hist[i];
         }
@@ -514,17 +522,24 @@ impl Agg {
             .collect();
         let per_seq_qual_status = self.per_seq_quality_status(ctx.mode);
 
-        let per_seq_gc: Vec<PerSeqGcRow> = self
-            .per_seq_gc_hist
+        let (gc_hist, per_seq_gc_status) = if ctx.mode == Mode::Short {
+            let hist = self.short_gc.histogram();
+            (hist, per_seq_gc::short_status(&hist))
+        } else {
+            (
+                self.per_seq_gc_hist.map(|count| count as f64),
+                self.per_seq_gc_status(),
+            )
+        };
+        let per_seq_gc: Vec<PerSeqGcRow> = gc_hist
             .iter()
             .enumerate()
-            .filter(|(_, c)| **c > 0)
+            .filter(|(_, c)| ctx.mode == Mode::Short || **c > 0.0)
             .map(|(gc, &count)| PerSeqGcRow {
                 gc: gc as u8,
                 count,
             })
             .collect();
-        let per_seq_gc_status = self.per_seq_gc_status();
 
         let mut per_seq_n = Vec::new();
         let mut per_seq_n_status = Status::Pass;
