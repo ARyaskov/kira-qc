@@ -81,9 +81,13 @@ impl AdapterSet {
             if a.probe.is_empty() {
                 bail!("adapter '{}' has an empty sequence", a.name);
             }
-            if !a.probe.bytes().all(|b| b.is_ascii_alphabetic()) {
+            if !a
+                .probe
+                .bytes()
+                .all(|b| matches!(b.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T' | b'N'))
+            {
                 bail!(
-                    "adapter '{}' contains non-nucleotide characters: {}",
+                    "adapter '{}' contains unsupported symbols (allowed: A, C, G, T, literal N): {}",
                     a.name,
                     a.probe
                 );
@@ -413,6 +417,30 @@ mod tests {
                 .to_string()
                 .contains("duplicate adapter name 'shared'")
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_probe_symbols_in_both_modes() {
+        for reverse_complement in [false, true] {
+            for probe in ["ACGZ", "ACGR", "ACGU"] {
+                let adapter = Adapter {
+                    name: "probe".into(),
+                    probe: probe.into(),
+                };
+                let error = AdapterSet::new(vec![adapter], reverse_complement).unwrap_err();
+                assert!(error.to_string().contains("unsupported symbols"));
+            }
+            let adapter = Adapter {
+                name: "probe".into(),
+                probe: "acgn".into(),
+            };
+            let set = AdapterSet::new(vec![adapter], reverse_complement).unwrap();
+            let mut hits = [false];
+            set.scan_any(b"ACGA", &mut hits);
+            assert!(!hits[0]);
+            set.scan_any(b"ACGN", &mut hits);
+            assert!(hits[0]);
+        }
     }
 
     #[test]

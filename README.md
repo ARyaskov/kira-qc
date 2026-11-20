@@ -121,6 +121,7 @@ kira-qc reads.fastq.gz -o qc/ --mode long
 
 Adapter and contaminant files use FastQC's format: `name<TAB>sequence`, with
 `#` starting a comment.
+Custom adapter probes accept A, C, G, T and literal N, case-insensitively.
 
 ## Output description
 
