@@ -357,13 +357,21 @@ fn gzip_and_multi_block_bgzf_match_plain_fastq() {
     let dir = tempfile::tempdir().unwrap();
     let plain = dir.path().join("reads.fastq");
     let gz = dir.path().join("reads.fastq.gz");
+    let concatenated = dir.path().join("concatenated.fastq.gz");
     let bgzf = dir.path().join("reads.fastq.bgzf");
     write_fastq(&plain, 1_000, true);
     let bytes = std::fs::read(&plain).unwrap();
     std::fs::write(&gz, gzip(&bytes)).unwrap();
+    let members: Vec<u8> = bytes.chunks(32_768).flat_map(gzip).collect();
+    std::fs::write(&concatenated, members).unwrap();
     let mut blocks: Vec<u8> = bytes.chunks(32_768).flat_map(bgzf_block).collect();
-    blocks.extend(bgzf_block(&[]));
-    std::fs::write(&bgzf, blocks).unwrap();
+    let real_blocks_len = blocks.len();
+    // The BGZF EOF marker has a canonical byte representation.
+    blocks.extend([
+        31, 139, 8, 4, 0, 0, 0, 0, 0, 255, 6, 0, b'B', b'C', 2, 0, 27, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ]);
+    std::fs::write(&bgzf, &blocks).unwrap();
     let normalized_report = |path: &Path| {
         render_data_txt(path, 2, Mode::Short)
             .lines()
@@ -371,8 +379,18 @@ fn gzip_and_multi_block_bgzf_match_plain_fastq() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    assert_eq!(normalized_report(&gz), normalized_report(&plain));
-    assert_eq!(normalized_report(&bgzf), normalized_report(&plain));
+    let expected = normalized_report(&plain);
+    assert_eq!(normalized_report(&gz), expected);
+    assert_eq!(normalized_report(&concatenated), expected);
+    assert_eq!(normalized_report(&bgzf), expected);
+    std::fs::write(&bgzf, &blocks[..real_blocks_len]).unwrap();
+    let error = run(config(&bgzf, 2, Mode::Short))
+        .err()
+        .expect("missing BGZF EOF marker must fail");
+    assert!(
+        error.to_string().contains("BgzfMissingEofMarker"),
+        "{error}"
+    );
 }
 
 #[test]

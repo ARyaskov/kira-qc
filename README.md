@@ -61,10 +61,7 @@ Build options:
 The default build needs no C toolchain: the ZIP writer uses only the pure-Rust
 deflate backend.
 
-The minimum supported Rust version is 1.95. kira-qc's own code compiles on
-1.88; the higher floor comes from the `kira-fastq` dependency, which declares
-`rust-version = "1.95"`. Conda and HPC environments that pin an older toolchain
-need that dependency to relax its MSRV first.
+The minimum supported Rust version for kira-qc is 1.95.
 
 ## Usage
 

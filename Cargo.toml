@@ -3,9 +3,6 @@ name = "kira-qc"
 description = "FastQC-compatible QC tool written in Rust"
 version = "0.3.0"
 edition = "2024"
-# kira-qc's own code needs 1.88 (edition 2024 plus let-chains), but the
-# effective floor is set by kira-fastq, which declares 1.95. Lowering it
-# requires a kira-fastq release with a lower rust-version.
 rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/ARyaskov/kira-qc"
@@ -28,7 +25,7 @@ categories = [
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
-kira-fastq = "0.3"
+kira-fastq = "0.5.0"
 # Default features drag in zstd-sys, bzip2, lzma and aes; deflate is all a
 # FastQC-style report bundle needs and it keeps `cargo install` free of a C
 # toolchain requirement.
