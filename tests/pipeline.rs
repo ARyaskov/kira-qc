@@ -442,6 +442,43 @@ fn colliding_sample_outputs_fail_before_any_reports_are_written() {
 }
 
 #[test]
+fn named_stdin_reports_expose_distinct_multiqc_filenames() {
+    use std::process::{Command, Stdio};
+
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("reads.fastq");
+    write_fastq(&input, 10, false);
+    for sample in ["first", "second"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+            .args([
+                "-",
+                "--sample-name",
+                sample,
+                "--quiet",
+                "--no-zip",
+                "-t",
+                "1",
+                "-o",
+            ])
+            .arg(root.path())
+            .stdin(Stdio::from(std::fs::File::open(&input).unwrap()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = root.path().join(format!("{sample}_fastqc/fastqc_data.txt"));
+        assert!(
+            std::fs::read_to_string(report)
+                .unwrap()
+                .contains(&format!("\nFilename\t{sample}\n"))
+        );
+    }
+}
+
+#[test]
 fn phred_detection_rules() {
     // Modern high-quality Illumina data must not be read as Phred+64.
     assert_eq!(decide_phred_offset(70, 70, 5_000, Mode::Short), 33);

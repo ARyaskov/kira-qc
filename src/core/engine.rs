@@ -133,7 +133,7 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
             .and_then(|s| s.to_str())
             .map(str::to_string)
             .context("failed to determine input filename")?,
-        Input::Stdin => "stdin".to_string(),
+        Input::Stdin => cfg.sample_name.clone(),
     };
 
     let threads = cfg.threads.max(1);
