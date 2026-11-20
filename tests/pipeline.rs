@@ -383,6 +383,39 @@ fn gzip_and_multi_block_bgzf_match_plain_fastq() {
     assert_eq!(normalized_report(&gz), expected);
     assert_eq!(normalized_report(&concatenated), expected);
     assert_eq!(normalized_report(&bgzf), expected);
+    for (index, path) in [&plain, &gz, &concatenated, &bgzf].into_iter().enumerate() {
+        let sample = format!("stdin_{index}");
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+            .args([
+                "-",
+                "--sample-name",
+                &sample,
+                "--quiet",
+                "--no-zip",
+                "-t",
+                "2",
+                "-o",
+            ])
+            .arg(dir.path())
+            .stdin(std::fs::File::open(path).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report =
+            std::fs::read_to_string(dir.path().join(format!("{sample}_fastqc/fastqc_data.txt")))
+                .unwrap();
+        let from_stdin = report
+            .lines()
+            .filter(|line| !line.starts_with("Filename\t"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(from_stdin, expected);
+    }
+
     std::fs::write(&bgzf, &blocks[..real_blocks_len]).unwrap();
     let error = run(config(&bgzf, 2, Mode::Short))
         .err()

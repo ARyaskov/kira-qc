@@ -255,10 +255,10 @@ fn open_reader(input: &Input) -> Result<FastqReader> {
     match input {
         Input::Path(path) => FastqReader::from_path_auto(path)
             .map_err(|e| anyhow!("failed to open FASTQ input {}: {e:?}", path.display())),
-        Input::Stdin => Ok(FastqReader::from_reader(BufReader::with_capacity(
-            1 << 20,
-            std::io::stdin(),
-        ))),
+        Input::Stdin => {
+            FastqReader::from_reader_auto(BufReader::with_capacity(1 << 20, std::io::stdin()))
+                .map_err(|e| anyhow!("failed to open FASTQ input from stdin: {e:?}"))
+        }
     }
 }
 
