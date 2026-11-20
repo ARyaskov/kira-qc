@@ -43,7 +43,7 @@ def multiqc(root, archives):
 
 
 def reference_report(fastqc, sample, reference):
-    reference.mkdir()
+    reference.mkdir(exist_ok=True)
     run(
         "java", "-Djava.awt.headless=true", "-Dfastqc.quiet=true",
         f"-Dfastqc.output_dir={reference}", "-cp", f"{fastqc}{os.pathsep}{fastqc / '*'}",
@@ -68,11 +68,11 @@ def verify_gc(binary, fastqc, root):
                                 [b"G" * 24 + b"A" * 27] * 150 +
                                 [b"G" * 29 + b"A" * 22] * 35):
             out.write(f"@read{i}\n".encode() + seq + b"\n+\n" + b"5" * len(seq) + b"\n")
-    expected = reference_report(fastqc, sample, root / "gc-reference")
-    run(str(binary), str(sample), "--quiet", "-o", str(root))
+    expected = reference_report(fastqc, sample, root / "metrics-reference")
+    run(str(binary), str(sample), "--quiet", "-o", str(root / "metrics-candidate"))
     module = "Per sequence GC content"
     compare_section(sections(expected, "gc")[module],
-                    sections(root / "gc_fastqc.zip", "gc")[module], 1, 1e-9)
+                    sections(root / "metrics-candidate/gc_fastqc.zip", "gc")[module], 1, 1e-9)
 
 
 def verify_tiles(binary, fastqc, root):
@@ -82,12 +82,27 @@ def verify_tiles(binary, fastqc, root):
             for i in range(count):
                 out.write(f"@MK:1:FLOW:1:{tile}:{i}:1\n".encode()
                           + b"ACGT" * 10 + b"\n+\n" + quality * 40 + b"\n")
-    expected = reference_report(fastqc, sample, root / "tile-reference")
-    run(str(binary), str(sample), "--quiet", "-o", str(root))
+    expected = reference_report(fastqc, sample, root / "metrics-reference")
+    run(str(binary), str(sample), "--quiet", "-o", str(root / "metrics-candidate"))
     module = "Per tile sequence quality"
-    actual = sections(root / "tiles_fastqc.zip", "tiles")[module]
+    actual = sections(root / "metrics-candidate/tiles_fastqc.zip", "tiles")[module]
     assert actual[0] == "warn"
     compare_section(sections(expected, "tiles")[module], actual, 2, 0.005)
+
+
+def verify_imported_metric_statuses(root):
+    candidate = multiqc(root / "multiqc-metrics-candidate", [root / "metrics-candidate"])
+    reference = multiqc(root / "multiqc-metrics-reference", [root / "metrics-reference"])
+    assert set(candidate) == set(reference) == {"gc", "tiles"}
+    key_by_sample = {
+        "gc": "per_sequence_gc_content",
+        "tiles": "per_tile_sequence_quality",
+    }
+    for sample, key in key_by_sample.items():
+        assert candidate[sample][key] == reference[sample][key], (
+            sample, key, candidate[sample][key], reference[sample][key]
+        )
+        assert candidate[sample]["Total Sequences"] == reference[sample]["Total Sequences"]
 
 
 def verify_directory_import(binary, root):
@@ -172,7 +187,7 @@ def verify(binary, fastqc, root):
         assert (candidate / "oracle_fastqc.html").read_bytes() == archive.read(
             "oracle_fastqc/fastqc_report.html"
         )
-    print("FastQC numeric checks and MultiQC import passed for all three candidate samples")
+    print("FastQC numeric checks and MultiQC import passed")
 
 
 if __name__ == "__main__":
@@ -183,5 +198,6 @@ if __name__ == "__main__":
     with TemporaryDirectory() as temp:
         verify_gc(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
         verify_tiles(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
+        verify_imported_metric_statuses(Path(temp))
         verify_directory_import(args.binary.resolve(), Path(temp))
         verify(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
