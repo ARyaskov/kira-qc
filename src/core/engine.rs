@@ -199,6 +199,7 @@ pub fn run(cfg: RunConfig) -> Result<RunOutput> {
     if final_agg.total_reads == 0 {
         bail!("no FASTQ records found in input");
     }
+    final_agg.seq_tracker.ensure_complete()?;
 
     let encoding = if meta.phred_offset == 64 {
         Encoding::Illumina15

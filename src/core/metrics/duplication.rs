@@ -18,7 +18,7 @@ use rustc_hash::FxHashMap;
 /// Reads fed to the estimator by default. Counting is exact within the window.
 pub const DEFAULT_DUP_WINDOW: u64 = 1_000_000;
 
-/// Hard ceiling on distinct sequences, only reachable with `--dup-window 0`.
+/// Hard ceiling on distinct sequences in a duplication window.
 pub const DUP_DISTINCT_CAP: usize = 2_000_000;
 
 /// FastQC truncates sequences longer than this before hashing them.
@@ -78,6 +78,7 @@ struct Slot {
 /// Exact sequence counter over a bounded window of reads.
 #[derive(Clone, Debug)]
 pub struct SeqTracker {
+    distinct_cap: usize,
     index: FxHashMap<u64, u32>,
     slots: Vec<Slot>,
     /// Packed storage for the truncated sequences; avoids one allocation per slot.
@@ -97,6 +98,7 @@ impl Default for SeqTracker {
 impl SeqTracker {
     pub fn new() -> Self {
         Self {
+            distinct_cap: DUP_DISTINCT_CAP,
             index: FxHashMap::default(),
             slots: Vec::new(),
             arena: Vec::new(),
@@ -109,6 +111,7 @@ impl SeqTracker {
     pub fn with_capacity(entries: usize) -> Self {
         let entries = entries.min(DUP_DISTINCT_CAP);
         Self {
+            distinct_cap: DUP_DISTINCT_CAP,
             index: FxHashMap::with_capacity_and_hasher(entries, Default::default()),
             slots: Vec::with_capacity(entries),
             arena: Vec::with_capacity(entries * DUP_TRUNCATE_TO),
@@ -123,6 +126,15 @@ impl SeqTracker {
 
     pub fn dropped_reads(&self) -> u64 {
         self.dropped_reads
+    }
+
+    pub(crate) fn ensure_complete(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.dropped_reads == 0,
+            "duplication window exceeded the {} distinct sequence limit; use a smaller --dup-window",
+            self.distinct_cap
+        );
+        Ok(())
     }
 
     pub fn distinct(&self) -> usize {
@@ -148,7 +160,7 @@ impl SeqTracker {
             return;
         }
 
-        if self.slots.len() >= DUP_DISTINCT_CAP {
+        if self.slots.len() >= self.distinct_cap {
             self.dropped_reads += 1;
             return;
         }
@@ -170,8 +182,8 @@ impl SeqTracker {
         self.observed_reads += other.observed_reads;
         self.dropped_reads += other.dropped_reads;
 
-        // Merge in first-seen order so that, if the cap is ever reached, the
-        // surviving set is the globally earliest one regardless of scheduling.
+        // Use first-seen order within this partial result. A result that
+        // exceeds the cap is rejected before it can be reported.
         let mut order: Vec<u32> = (0..other.slots.len() as u32).collect();
         order.sort_unstable_by_key(|&i| {
             let s = &other.slots[i as usize];
@@ -190,7 +202,7 @@ impl SeqTracker {
                     }
                 }
                 None => {
-                    if self.slots.len() >= DUP_DISTINCT_CAP {
+                    if self.slots.len() >= self.distinct_cap {
                         self.dropped_reads += s.count;
                         continue;
                     }
@@ -323,6 +335,33 @@ pub fn hash_seq(seq: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_distinct_limit_overflow_invalidates_direct_and_merged_counts() {
+        let tracker = || SeqTracker {
+            distinct_cap: 1,
+            ..SeqTracker::new()
+        };
+        let mut first = tracker();
+        first.add(b"AAAA", 0);
+        first.add(b"AAAA", 1);
+        assert!(first.ensure_complete().is_ok());
+        let mut second = tracker();
+        second.add(b"CCCC", 2);
+        let mut merged = first.clone();
+        merged.merge(&second);
+        second.merge(&first);
+        first.add(b"CCCC", 2);
+        for result in [first, second, merged] {
+            assert!(
+                result
+                    .ensure_complete()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--dup-window")
+            );
+        }
+    }
 
     #[test]
     fn counts_are_exact() {

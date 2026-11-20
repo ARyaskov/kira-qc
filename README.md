@@ -163,7 +163,9 @@ Known differences:
 - Duplication and overrepresentation are estimated from the first
   `--dup-window` reads (one million by default) and counted exactly within that
   window, rather than from the first 100 000 distinct sequences of the whole
-  file. The report states the window when it is not the whole file.
+  file. The HTML and JSON reports state the window when it covers only part
+  of the file. A run fails if the window contains more than two million
+  distinct tracked sequences. Use a smaller `--dup-window` in that case.
 - `--limits` honours `ignore` directives; threshold overrides are reported as
   unsupported rather than silently dropped.
 - BAM, CRAM and SAM are not read natively. Pipe them through `samtools fastq`.
