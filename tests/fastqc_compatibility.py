@@ -90,6 +90,34 @@ def verify_tiles(binary, fastqc, root):
     compare_section(sections(expected, "tiles")[module], actual, 2, 0.005)
 
 
+def verify_directory_import(binary, root):
+    sample = root / "rerun.fastq"
+    reports = root / "rerun-reports"
+    command = (str(binary), str(sample), "--quiet", "-o", str(reports))
+    record = b"@read\nACGT\n+\n5555\n"
+    sample.write_bytes(record * 5)
+    run(*command, "--json")
+    extracted = reports / "rerun_fastqc"
+    unrelated = extracted / "notes.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    sample.write_bytes(record * 7)
+    run(*command, "--noextract")
+    assert not (extracted / "fastqc_data.txt").exists()
+    assert not (extracted / "kira_qc.json").exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    imported = multiqc(root / "multiqc-rerun-zip", [reports])
+    assert set(imported) == {"rerun"}
+    assert float(imported["rerun"]["Total Sequences"]) == 7
+
+    sample.write_bytes(record * 9)
+    run(*command, "--no-zip")
+    assert not (reports / "rerun_fastqc.zip").exists()
+    imported = multiqc(root / "multiqc-rerun-extracted", [reports])
+    assert set(imported) == {"rerun"}
+    assert float(imported["rerun"]["Total Sequences"]) == 9
+
+
 def verify(binary, fastqc, root):
     sample = root / "oracle.fastq"
     sequence = b"GCNN" + b"ACGT" * 24
@@ -155,4 +183,5 @@ if __name__ == "__main__":
     with TemporaryDirectory() as temp:
         verify_gc(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
         verify_tiles(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))
+        verify_directory_import(args.binary.resolve(), Path(temp))
         verify(args.binary.resolve(), args.fastqc_directory.resolve(), Path(temp))

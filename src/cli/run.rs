@@ -202,22 +202,13 @@ fn run_one(
     let metrics = output.agg.finalize(&output.ctx);
     log.stage("finalize", t_finalize);
 
-    let temp_dir = if args.noextract {
-        fs::create_dir_all(&out_root)?;
-        Some(
-            tempfile::Builder::new()
-                .prefix(".kira-qc-")
-                .tempdir_in(&out_root)?,
-        )
-    } else {
-        None
-    };
-    let out_dir = temp_dir.as_ref().map_or_else(
-        || out_root.join(format!("{sample_name}_fastqc")),
-        |dir| dir.path().to_owned(),
-    );
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
+    fs::create_dir_all(&out_root)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".kira-qc-")
+        .tempdir_in(&out_root)?;
+    let report_name = format!("{sample_name}_fastqc");
+    let out_dir = staging.path().join(&report_name);
+    fs::create_dir(&out_dir)?;
 
     report::fastqc_txt::write(&out_dir.join("fastqc_data.txt"), &metrics, &output.ctx)?;
     report::summary_txt::write(&out_dir.join("summary.txt"), &metrics, &output.ctx)?;
@@ -252,26 +243,19 @@ fn run_one(
 
     if !args.no_zip {
         let t_zip = Instant::now();
-        report::zip::write_zip_from(&out_root, &out_dir, &sample_name, &extra_files)
+        report::zip::write_zip_from(staging.path(), &out_dir, &sample_name, &extra_files)
             .with_context(|| "failed to create zip output")?;
         log.stage("zip", t_zip);
     }
 
-    let standalone_html = out_root.join(format!("{sample_name}_fastqc.html"));
-    let mut html = fs::File::open(out_dir.join("fastqc_report.html"))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&out_root)?;
-    std::io::copy(&mut html, temporary.as_file_mut())?;
-    drop(html);
-    temporary
-        .persist(&standalone_html)
-        .with_context(|| format!("failed to publish {}", standalone_html.display()))?;
-
-    if let Some(temp_dir) = temp_dir {
-        temp_dir
-            .close()
-            .context("failed to remove temporary report directory")?;
-    } else if !args.quiet {
-        eprintln!("kira-qc: wrote {}", out_dir.display());
+    let html_name = format!("{report_name}.html");
+    fs::copy(
+        out_dir.join("fastqc_report.html"),
+        staging.path().join(&html_name),
+    )?;
+    publish_report(staging, &out_root, &report_name, &html_name, args.noextract)?;
+    if !args.noextract && !args.quiet {
+        eprintln!("kira-qc: wrote {}", out_root.join(&report_name).display());
     }
 
     log.line(format_args!(
@@ -282,6 +266,157 @@ fn run_one(
         crate::core::stats::fmt_dur(t0.elapsed())
     ));
     Ok(())
+}
+
+fn publish_report(
+    staging: tempfile::TempDir,
+    root: &Path,
+    report_name: &str,
+    html_name: &str,
+    noextract: bool,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, ErrorKind};
+
+    // Keep the lock inode stable so simultaneous publishers always lock the same file.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".kira-qc.lock"))?;
+    lock.lock()?;
+
+    let existing = root.join(report_name);
+    for directory in [
+        &existing,
+        &existing.join("latex"),
+        &existing.join("latex/tables"),
+        &existing.join("latex/figures"),
+    ] {
+        match fs::symlink_metadata(directory) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => bail!("expected a report directory: {}", directory.display()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let staged = staging.path().join(report_name);
+    let mut paths = vec![
+        PathBuf::from(html_name),
+        PathBuf::from(format!("{report_name}.zip")),
+    ];
+    let files = [
+        "fastqc_data.txt",
+        "summary.txt",
+        "fastqc_report.html",
+        "kira_qc.json",
+    ];
+    let is_kira_report = match fs::File::open(existing.join(files[0])) {
+        Ok(file) => {
+            let mut lines = BufReader::new(file).lines();
+            lines
+                .nth(1)
+                .transpose()?
+                .is_some_and(|line| line.starts_with("##kira-qc\t"))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if noextract && !is_kira_report && existing.join(files[0]).exists() {
+        bail!(
+            "cannot publish ZIP beside a foreign report: {}",
+            existing.display()
+        );
+    }
+
+    if !noextract || is_kira_report {
+        paths.extend(files.map(|name| Path::new(report_name).join(name)));
+        paths.extend(
+            managed_latex_files()
+                .into_iter()
+                .map(|name| Path::new(report_name).join(name)),
+        );
+    }
+    let backup = staging.path().join("backup");
+    fs::create_dir(&backup)?;
+    let mut retired = Vec::new();
+    let mut installed = Vec::new();
+    let result = (|| -> Result<()> {
+        for path in &paths {
+            let dest = root.join(path);
+            match fs::symlink_metadata(&dest) {
+                Ok(meta) if meta.file_type().is_file() => {
+                    let saved = backup.join(path);
+                    fs::create_dir_all(saved.parent().unwrap())?;
+                    fs::rename(&dest, &saved)?;
+                    retired.push((saved, dest));
+                }
+                Ok(_) => bail!("expected a regular report file: {}", dest.display()),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for path in &paths {
+            let source = staging.path().join(path);
+            if (noextract && source.starts_with(&staged)) || !source.is_file() {
+                continue;
+            }
+            let dest = root.join(path);
+            fs::create_dir_all(dest.parent().unwrap())?;
+            fs::rename(&source, &dest)?;
+            installed.push((dest, source));
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
+        for (from, to) in installed.iter().rev().chain(retired.iter().rev()) {
+            if let Err(error) = fs::rename(from, to) {
+                rollback_errors.push(format!("{}: {error}", to.display()));
+            }
+        }
+        if !rollback_errors.is_empty() {
+            let retained = staging.keep();
+            bail!(
+                "failed to publish reports: {error:#}; recovery files in {}: {}",
+                retained.display(),
+                rollback_errors.join(", ")
+            );
+        }
+        return Err(error).context("failed to publish reports");
+    }
+    staging
+        .close()
+        .context("failed to remove report staging directory")
+}
+
+fn managed_latex_files() -> Vec<PathBuf> {
+    let mut paths = [
+        "latex/kira_qc.tex",
+        "latex/README.md",
+        "latex/kira_qc_latex.zip",
+        "latex/tables/basic_statistics.tex",
+    ]
+    .map(PathBuf::from)
+    .to_vec();
+    for name in [
+        "per_base_quality",
+        "per_sequence_quality",
+        "duplication_levels",
+        "adapter_content",
+        "sequence_length_distribution",
+        "per_tile_quality",
+        "per_base_content",
+        "per_sequence_gc",
+        "per_base_n",
+        "overrepresented_sequences",
+        "kmer_content",
+        "per_sequence_n",
+    ] {
+        paths.push(PathBuf::from(format!("latex/figures/{name}.svg")));
+        paths.push(PathBuf::from(format!("latex/figures/{name}.pdf")));
+    }
+    paths
 }
 
 /// FastQC's output naming: strip the compression suffix, then the FASTQ

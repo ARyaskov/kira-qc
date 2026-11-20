@@ -35,6 +35,7 @@ pub fn write(path: &Path, metrics: &FinalMetrics, ctx: &FinalizeContext) -> Resu
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut w = BufWriter::new(file);
     w.write_all(html.as_bytes())?;
+    w.flush()?;
     Ok(())
 }
 

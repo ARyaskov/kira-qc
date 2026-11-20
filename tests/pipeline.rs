@@ -437,7 +437,7 @@ fn malformed_input_after_a_full_chunk_fails_the_run() {
 }
 
 #[test]
-fn noextract_preserves_existing_reports_and_rejects_path_sample_names() {
+fn noextract_preserves_unrelated_files_and_rejects_path_sample_names() {
     use std::process::Command;
 
     let root = tempfile::tempdir().unwrap();
@@ -477,7 +477,7 @@ fn noextract_preserves_existing_reports_and_rejects_path_sample_names() {
     )
     .unwrap();
     assert_eq!(standalone, bundled);
-    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 5);
 
     let output = run_cli(&["--sample-name", "../other"]);
     assert!(!output.status.success());
