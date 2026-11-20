@@ -95,11 +95,11 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
             |o, r| {
                 kv_str(o, 3, "base", &r.group.label(), true);
                 kv_num(o, 3, "mean", r.mean, true);
-                kv_num(o, 3, "median", r.median as f64, true);
-                kv_num(o, 3, "lower_quartile", r.lower_quartile as f64, true);
-                kv_num(o, 3, "upper_quartile", r.upper_quartile as f64, true);
-                kv_num(o, 3, "percentile_10", r.p10 as f64, true);
-                kv_num(o, 3, "percentile_90", r.p90 as f64, false);
+                kv_num(o, 3, "median", r.median, true);
+                kv_num(o, 3, "lower_quartile", r.lower_quartile, true);
+                kv_num(o, 3, "upper_quartile", r.upper_quartile, true);
+                kv_num(o, 3, "percentile_10", r.p10, true);
+                kv_num(o, 3, "percentile_90", r.p90, false);
             },
         );
     }

@@ -265,7 +265,31 @@ fn base_groups_keep_long_reads_from_exploding_the_report() {
         per_base_rows < 100,
         "expected grouped positions, got {per_base_rows} rows"
     );
-    assert!(text.contains("\n10-14\t"), "expected FastQC base groups");
+    assert!(text.contains("\n10-49\t"), "expected FastQC base groups");
+}
+
+#[test]
+fn grouped_quality_uses_per_cycle_statistics_and_coverage() {
+    let path = scratch("grouped_quality").join("reads.fastq");
+    let mut quality = vec![b'I'; 100];
+    quality[9] = b'5';
+    quality[10] = b'H';
+    let quality = String::from_utf8(quality).unwrap();
+    let seq = "ACGT".repeat(25);
+    let mut input = format!("@read\n{seq}\n+\n{quality}\n").repeat(101);
+    input.push_str(&format!("@tail\n{seq}A\n+\n{quality}!\n"));
+    std::fs::write(&path, input).unwrap();
+
+    let output = run(config(&path, 1, Mode::Short)).unwrap();
+    let metrics = output.agg.finalize(&output.ctx);
+    let grouped = &metrics.per_base_qual[9];
+    assert_eq!(grouped.group.label(), "10-11");
+    assert_eq!(grouped.median, 29.5);
+    let tail = metrics.per_base_qual.last().unwrap();
+    assert_eq!(tail.group.label(), "100-101");
+    assert_eq!(tail.mean, 20.0);
+    assert_eq!(tail.median, 40.0);
+    assert_eq!(metrics.statuses.per_base_qual, Status::Pass);
 }
 
 #[test]

@@ -196,8 +196,7 @@ impl BaseGroup {
     }
 }
 
-/// FastQC's widening base groups: positions 1-9 are always reported
-/// individually, after which the interval grows with read length.
+/// FastQC's default linear grouping, with positions 1-9 shown individually.
 pub fn make_base_groups(max_len: usize, nogroup: bool) -> Vec<BaseGroup> {
     if max_len == 0 {
         return Vec::new();
@@ -211,31 +210,35 @@ pub fn make_base_groups(max_len: usize, nogroup: bool) -> Vec<BaseGroup> {
             .collect();
     }
 
-    let mut groups = Vec::new();
+    let mut interval = 1;
+    for magnitude in std::iter::successors(Some(1usize), |scale| scale.checked_mul(10)) {
+        if let Some(width) = [2, 5, 10]
+            .into_iter()
+            .map(|base| base * magnitude)
+            .find(|&width| (max_len - 9).div_ceil(width) < 66)
+        {
+            interval = width;
+            break;
+        }
+    }
+
+    let mut groups = Vec::with_capacity(75);
     let mut start = 1usize;
-    let mut interval = 1usize;
     while start <= max_len {
-        let end = (start + interval - 1).min(max_len);
+        let end = match start {
+            1..=9 => start,
+            10 if interval > 10 => interval - 1,
+            _ => start.saturating_add(interval - 1),
+        }
+        .min(max_len);
         groups.push(BaseGroup {
             start: start as u32,
             end: end as u32,
         });
-        start += interval;
-        if start == 10 && max_len > 75 {
-            interval = 5;
+        if end == max_len {
+            break;
         }
-        if start == 50 && max_len > 200 {
-            interval = 10;
-        }
-        if start == 100 && max_len > 300 {
-            interval = 50;
-        }
-        if start == 500 && max_len > 1000 {
-            interval = 100;
-        }
-        if start == 1000 && max_len > 2000 {
-            interval = 500;
-        }
+        start = end + 1;
     }
     groups
 }
@@ -401,7 +404,7 @@ mod tests {
             assert_eq!(g.start, i as u32 + 1);
             assert_eq!(g.end, i as u32 + 1);
         }
-        assert_eq!(groups[9], BaseGroup { start: 10, end: 14 });
+        assert_eq!(groups[9], BaseGroup { start: 10, end: 11 });
         // groups must tile the whole range without gaps or overlap
         let mut expect_next = 1u32;
         for g in &groups {

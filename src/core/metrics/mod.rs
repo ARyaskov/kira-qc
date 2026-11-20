@@ -620,34 +620,42 @@ impl Agg {
         let mut rows = Vec::with_capacity(groups.len());
         let mut status = Status::Pass;
         for g in groups {
-            let mut hist = [0u64; MAX_Q + 1];
-            let mut total: u64 = 0;
-            let mut sum: u64 = 0;
+            let mut mean_sum = 0.0;
+            let mut positions = 0;
+            let mut percentiles = [0.0; 5];
+            let mut covered = 0;
             for i in g.range() {
                 let Some(h) = self.per_pos_qual.get(i) else {
                     continue;
                 };
-                for (q, &c) in h.iter().enumerate() {
-                    hist[q] += c;
-                    total += c;
-                    sum += c * q as u64;
+                let (total, sum) = h.iter().enumerate().fold((0, 0), |(total, sum), (q, &n)| {
+                    (total + n, sum + n * q as u64)
+                });
+                if total != 0 {
+                    mean_sum += sum as f64 / total as f64;
+                    positions += 1;
+                }
+                if total > 100 {
+                    for (sum, value) in percentiles
+                        .iter_mut()
+                        .zip(per_base_qual::position_percentiles(h, total))
+                    {
+                        *sum += value;
+                    }
+                    covered += 1;
                 }
             }
-            if total == 0 {
+            if positions == 0 {
                 continue;
             }
-            let mean = sum as f64 / total as f64;
-            let median = quantile_from_hist(&hist, 0.5);
-            let lq = quantile_from_hist(&hist, 0.25);
-            let uq = quantile_from_hist(&hist, 0.75);
-            let p10 = quantile_from_hist(&hist, 0.10);
-            let p90 = quantile_from_hist(&hist, 0.90);
+            let mean = mean_sum / positions as f64;
+            let [p10, lq, median, uq, p90] = percentiles.map(|v| v / covered as f64);
 
             // FastQC: warn on lower quartile < 10 or median < 25,
             // fail on lower quartile < 5 or median < 20.
-            if lq < 5 || median < 20 {
+            if lq < 5.0 || median < 20.0 {
                 status = Status::Fail;
-            } else if (lq < 10 || median < 25) && status != Status::Fail {
+            } else if (lq < 10.0 || median < 25.0) && status != Status::Fail {
                 status = Status::Warn;
             }
 
@@ -1146,14 +1154,14 @@ mod tests {
     #[test]
     fn per_base_quality_uses_quartiles() {
         let mut a = agg(Mode::Short);
-        for i in 0..100u64 {
+        for i in 0..101u64 {
             a.update_read(&ReadView::new(b"ACGT", &q(30, 4)), 33, i);
         }
         let m = a.finalize(&ctx(Mode::Short));
         assert_eq!(m.statuses.per_base_qual, Status::Pass);
 
         let mut b = agg(Mode::Short);
-        for i in 0..100u64 {
+        for i in 0..101u64 {
             b.update_read(&ReadView::new(b"ACGT", &q(4, 4)), 33, i);
         }
         let m2 = b.finalize(&ctx(Mode::Short));
@@ -1255,7 +1263,7 @@ mod tests {
             m.per_base_qual.len()
         );
         assert_eq!(m.per_base_qual[0].group.label(), "1");
-        assert_eq!(m.per_base_qual[9].group.label(), "10-14");
+        assert_eq!(m.per_base_qual[9].group.label(), "10-49");
     }
 
     #[test]

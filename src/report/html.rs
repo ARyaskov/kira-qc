@@ -337,7 +337,7 @@ fn per_base_quality(out: &mut String, metrics: &FinalMetrics) -> Result<()> {
     let max_q = metrics
         .per_base_qual
         .iter()
-        .map(|r| r.p90 as f64)
+        .map(|r| r.p90.max(r.mean))
         .fold(40.0, f64::max);
     svg_boxplot(out, &metrics.per_base_qual, PLOT_W, PLOT_H, max_q)?;
     table(out, "Data", |o| {
@@ -870,16 +870,21 @@ fn svg_boxplot(
 
     for (i, r) in rows.iter().enumerate() {
         let x = f.left + (i as f64 + 0.5) * x_step;
-        let y_m = f.top + f.plot_h - (r.median as f64 * y_scale);
-        let y_lq = f.top + f.plot_h - (r.lower_quartile as f64 * y_scale);
-        let y_uq = f.top + f.plot_h - (r.upper_quartile as f64 * y_scale);
-        let y_p10 = f.top + f.plot_h - (r.p10 as f64 * y_scale);
-        let y_p90 = f.top + f.plot_h - (r.p90 as f64 * y_scale);
+        if r.median.is_nan() {
+            let y = f.top + f.plot_h - r.mean * y_scale;
+            writeln!(out, "<circle cx=\"{x}\" cy=\"{y}\" r=\"2\" fill=\"#555\"/>")?;
+            continue;
+        }
+        let y_m = f.top + f.plot_h - r.median * y_scale;
+        let y_lq = f.top + f.plot_h - r.lower_quartile * y_scale;
+        let y_uq = f.top + f.plot_h - r.upper_quartile * y_scale;
+        let y_p10 = f.top + f.plot_h - r.p10 * y_scale;
+        let y_p90 = f.top + f.plot_h - r.p90 * y_scale;
         let box_w = (x_step * 0.8).max(1.0);
         let box_x = x - box_w / 2.0;
-        let color = if r.median >= 28 {
+        let color = if r.median >= 28.0 {
             "#cdeccf"
-        } else if r.median >= 20 {
+        } else if r.median >= 20.0 {
             "#ffe5b4"
         } else {
             "#f4c7c3"
@@ -1607,7 +1612,7 @@ pub(crate) fn latex_svg_per_base_quality(metrics: &FinalMetrics) -> Result<Strin
     let max_q = metrics
         .per_base_qual
         .iter()
-        .map(|r| r.p90 as f64)
+        .map(|r| r.p90.max(r.mean))
         .fold(40.0, f64::max);
     let mut s = String::new();
     svg_boxplot(&mut s, &metrics.per_base_qual, PLOT_W, PLOT_H, max_q)?;
