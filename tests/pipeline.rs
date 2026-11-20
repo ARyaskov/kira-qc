@@ -598,3 +598,31 @@ fn limits_file_can_switch_modules_off() {
     assert!(!text.contains(">>Per base sequence content"));
     assert!(text.contains(">>Per base sequence quality"));
 }
+
+#[test]
+fn json_module_data_follows_each_ignore_directive_independently() {
+    let path = scratch("json_ignore_directives").join("reads.fastq");
+    write_fastq(&path, 10, false);
+    let output = run(config(&path, 1, Mode::Short)).unwrap();
+    let metrics = output.agg.finalize(&output.ctx);
+    let mut ctx = output.ctx;
+    for ignored in ["duplication", "overrepresented"] {
+        ctx.ignored_modules = vec![report::resolve_limits_key(ignored).unwrap().to_string()];
+        let json = report::json::render(&metrics, &ctx);
+        assert_eq!(
+            json.contains("\"overrepresented_sequences\": ["),
+            ignored != "overrepresented"
+        );
+        assert_eq!(
+            json.contains("\"duplication\": {"),
+            ignored != "duplication"
+        );
+    }
+    ctx.ignored_modules = vec![
+        "adapter_content".to_string(),
+        "per_sequence_gc_content".to_string(),
+    ];
+    let json = report::json::render(&metrics, &ctx);
+    assert!(!json.contains("\"adapter_content\": ["));
+    assert!(!json.contains("\"per_sequence_gc\": ["));
+}

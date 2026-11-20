@@ -64,27 +64,29 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
     indent(&mut o, 1);
     o.push_str("},\n");
 
-    // Basic statistics.
-    let b = &metrics.basic;
-    indent(&mut o, 1);
-    o.push_str("\"basic_statistics\": {\n");
-    kv_str(&mut o, 2, "file_type", b.file_type, true);
-    kv_str(&mut o, 2, "encoding", b.encoding, true);
-    kv_num(&mut o, 2, "total_sequences", b.total_sequences as f64, true);
-    kv_num(&mut o, 2, "total_bases", b.total_bases as f64, true);
-    kv_num(
-        &mut o,
-        2,
-        "sequences_flagged_as_poor_quality",
-        b.poor_quality_sequences as f64,
-        true,
-    );
-    kv_num(&mut o, 2, "min_length", b.min_len as f64, true);
-    kv_num(&mut o, 2, "max_length", b.max_len as f64, true);
-    kv_num(&mut o, 2, "percent_gc", b.gc_percent as f64, false);
-    o.push('\n');
-    indent(&mut o, 1);
-    o.push_str("},\n");
+    if modules.contains(&ModuleId::Basic) {
+        // Basic statistics.
+        let b = &metrics.basic;
+        indent(&mut o, 1);
+        o.push_str("\"basic_statistics\": {\n");
+        kv_str(&mut o, 2, "file_type", b.file_type, true);
+        kv_str(&mut o, 2, "encoding", b.encoding, true);
+        kv_num(&mut o, 2, "total_sequences", b.total_sequences as f64, true);
+        kv_num(&mut o, 2, "total_bases", b.total_bases as f64, true);
+        kv_num(
+            &mut o,
+            2,
+            "sequences_flagged_as_poor_quality",
+            b.poor_quality_sequences as f64,
+            true,
+        );
+        kv_num(&mut o, 2, "min_length", b.min_len as f64, true);
+        kv_num(&mut o, 2, "max_length", b.max_len as f64, true);
+        kv_num(&mut o, 2, "percent_gc", b.gc_percent as f64, false);
+        o.push('\n');
+        indent(&mut o, 1);
+        o.push_str("},\n");
+    }
 
     if modules.contains(&ModuleId::PerBaseQual) {
         array_of_objects(
@@ -112,16 +114,18 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
         });
     }
 
-    array_of_objects(
-        &mut o,
-        1,
-        "per_sequence_quality",
-        &metrics.per_seq_qual,
-        |o, r| {
-            kv_num(o, 3, "quality", r.mean_q as f64, true);
-            kv_num(o, 3, "count", r.count as f64, false);
-        },
-    );
+    if modules.contains(&ModuleId::PerSeqQual) {
+        array_of_objects(
+            &mut o,
+            1,
+            "per_sequence_quality",
+            &metrics.per_seq_qual,
+            |o, r| {
+                kv_num(o, 3, "quality", r.mean_q as f64, true);
+                kv_num(o, 3, "count", r.count as f64, false);
+            },
+        );
+    }
 
     if modules.contains(&ModuleId::PerBaseContent) {
         array_of_objects(
@@ -139,10 +143,12 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
         );
     }
 
-    array_of_objects(&mut o, 1, "per_sequence_gc", &metrics.per_seq_gc, |o, r| {
-        kv_num(o, 3, "gc_percent", r.gc as f64, true);
-        kv_num(o, 3, "count", r.count as f64, false);
-    });
+    if modules.contains(&ModuleId::PerSeqGc) {
+        array_of_objects(&mut o, 1, "per_sequence_gc", &metrics.per_seq_gc, |o, r| {
+            kv_num(o, 3, "gc_percent", r.gc as f64, true);
+            kv_num(o, 3, "count", r.count as f64, false);
+        });
+    }
 
     if modules.contains(&ModuleId::PerBaseN) {
         array_of_objects(&mut o, 1, "per_base_n", &metrics.per_base_n, |o, r| {
@@ -158,38 +164,40 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
         });
     }
 
-    if let Some(ref ll) = metrics.long_length {
-        indent(&mut o, 1);
-        o.push_str("\"length_summary\": {\n");
-        kv_num(&mut o, 2, "min", ll.min as f64, true);
-        kv_num(&mut o, 2, "max", ll.max as f64, true);
-        kv_num(&mut o, 2, "mean", ll.mean, true);
-        kv_num(&mut o, 2, "median", ll.median as f64, true);
-        kv_num(&mut o, 2, "n50", ll.n50 as f64, true);
-        kv_num(&mut o, 2, "n90", ll.n90 as f64, true);
-        kv_num(&mut o, 2, "total_bases", ll.total_bases as f64, true);
-        indent(&mut o, 2);
-        o.push_str("\"bins\": [\n");
-        for (i, (label, count)) in ll.bins.iter().enumerate() {
-            indent(&mut o, 3);
-            let _ = write!(o, "{{\"range\": {}, \"count\": {}}}", quote(label), count);
-            o.push_str(if i + 1 < ll.bins.len() { ",\n" } else { "\n" });
+    if modules.contains(&ModuleId::LengthDist) {
+        if let Some(ref ll) = metrics.long_length {
+            indent(&mut o, 1);
+            o.push_str("\"length_summary\": {\n");
+            kv_num(&mut o, 2, "min", ll.min as f64, true);
+            kv_num(&mut o, 2, "max", ll.max as f64, true);
+            kv_num(&mut o, 2, "mean", ll.mean, true);
+            kv_num(&mut o, 2, "median", ll.median as f64, true);
+            kv_num(&mut o, 2, "n50", ll.n50 as f64, true);
+            kv_num(&mut o, 2, "n90", ll.n90 as f64, true);
+            kv_num(&mut o, 2, "total_bases", ll.total_bases as f64, true);
+            indent(&mut o, 2);
+            o.push_str("\"bins\": [\n");
+            for (i, (label, count)) in ll.bins.iter().enumerate() {
+                indent(&mut o, 3);
+                let _ = write!(o, "{{\"range\": {}, \"count\": {}}}", quote(label), count);
+                o.push_str(if i + 1 < ll.bins.len() { ",\n" } else { "\n" });
+            }
+            indent(&mut o, 2);
+            o.push_str("]\n");
+            indent(&mut o, 1);
+            o.push_str("},\n");
+        } else {
+            array_of_objects(
+                &mut o,
+                1,
+                "length_distribution",
+                &metrics.length_dist,
+                |o, r| {
+                    kv_num(o, 3, "length", r.length as f64, true);
+                    kv_num(o, 3, "count", r.count as f64, false);
+                },
+            );
         }
-        indent(&mut o, 2);
-        o.push_str("]\n");
-        indent(&mut o, 1);
-        o.push_str("},\n");
-    } else {
-        array_of_objects(
-            &mut o,
-            1,
-            "length_distribution",
-            &metrics.length_dist,
-            |o, r| {
-                kv_num(o, 3, "length", r.length as f64, true);
-                kv_num(o, 3, "count", r.count as f64, false);
-            },
-        );
     }
 
     if modules.contains(&ModuleId::Duplication) {
@@ -230,7 +238,9 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
         o.push_str("]\n");
         indent(&mut o, 1);
         o.push_str("},\n");
+    }
 
+    if modules.contains(&ModuleId::Overrepresented) {
         array_of_objects(
             &mut o,
             1,
@@ -245,52 +255,53 @@ pub fn render(metrics: &FinalMetrics, ctx: &FinalizeContext) -> String {
         );
     }
 
-    // Adapter content: one object per position group, adapters keyed by name.
-    indent(&mut o, 1);
-    o.push_str("\"adapter_content\": [\n");
-    for (i, row) in metrics.adapter_content.iter().enumerate() {
-        indent(&mut o, 2);
-        o.push_str("{\n");
-        kv_str(&mut o, 3, "position", &row.group.label(), true);
-        indent(&mut o, 3);
-        o.push_str("\"adapters\": {");
-        for (j, name) in metrics.adapter_names.iter().enumerate() {
-            if j > 0 {
-                o.push_str(", ");
+    if modules.contains(&ModuleId::AdapterContent) {
+        // Adapter content: one object per position group, adapters keyed by name.
+        indent(&mut o, 1);
+        o.push_str("\"adapter_content\": [\n");
+        for (i, row) in metrics.adapter_content.iter().enumerate() {
+            indent(&mut o, 2);
+            o.push_str("{\n");
+            kv_str(&mut o, 3, "position", &row.group.label(), true);
+            indent(&mut o, 3);
+            o.push_str("\"adapters\": {");
+            for (j, name) in metrics.adapter_names.iter().enumerate() {
+                if j > 0 {
+                    o.push_str(", ");
+                }
+                let _ = write!(
+                    o,
+                    "{}: {}",
+                    quote(name),
+                    num(row.values.get(j).copied().unwrap_or(0.0))
+                );
             }
-            let _ = write!(
-                o,
-                "{}: {}",
-                quote(name),
-                num(row.values.get(j).copied().unwrap_or(0.0))
-            );
+            o.push_str("}\n");
+            indent(&mut o, 2);
+            o.push('}');
+            o.push_str(if i + 1 < metrics.adapter_content.len() {
+                ",\n"
+            } else {
+                "\n"
+            });
         }
-        o.push_str("}\n");
-        indent(&mut o, 2);
-        o.push('}');
-        o.push_str(if i + 1 < metrics.adapter_content.len() {
-            ",\n"
-        } else {
-            "\n"
-        });
+        indent(&mut o, 1);
+        o.push_str("],\n");
     }
-    indent(&mut o, 1);
-    o.push(']');
 
     if modules.contains(&ModuleId::KmerContent) {
-        o.push_str(",\n");
-        array_of_objects_last(&mut o, 1, "kmer_content", &metrics.kmer_rows, |o, r| {
+        array_of_objects(&mut o, 1, "kmer_content", &metrics.kmer_rows, |o, r| {
             kv_str(o, 3, "sequence", &r.sequence, true);
             kv_num(o, 3, "count", r.count as f64, true);
             kv_num(o, 3, "p_value", r.p_value, true);
             kv_num(o, 3, "obs_exp_max", r.obs_exp, true);
             kv_num(o, 3, "max_obs_exp_position", r.max_pos as f64, false);
         });
-    } else {
-        o.push('\n');
     }
 
-    o.push_str("}\n");
+    // Every top-level field, including statuses, ends with a comma and newline.
+    o.truncate(o.len() - 2);
+    o.push_str("\n}\n");
     o
 }
 
@@ -333,14 +344,6 @@ where
 {
     array_of_objects_inner(o, level, key, rows, &mut body);
     o.push_str(",\n");
-}
-
-fn array_of_objects_last<T, F>(o: &mut String, level: usize, key: &str, rows: &[T], mut body: F)
-where
-    F: FnMut(&mut String, &T),
-{
-    array_of_objects_inner(o, level, key, rows, &mut body);
-    o.push('\n');
 }
 
 fn array_of_objects_inner<T, F>(o: &mut String, level: usize, key: &str, rows: &[T], body: &mut F)
