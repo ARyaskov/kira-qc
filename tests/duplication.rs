@@ -97,7 +97,9 @@ fn duplication_levels_use_fastqc_buckets() {
 fn status_thresholds_match_fastqc() {
     assert_eq!(duplication_status(100.0), Status::Pass);
     assert_eq!(duplication_status(85.0), Status::Pass);
-    assert_eq!(duplication_status(70.0), Status::Warn);
+    assert_eq!(duplication_status(70.0), Status::Pass);
+    assert_eq!(duplication_status(69.0), Status::Warn);
+    assert_eq!(duplication_status(50.0), Status::Warn);
     assert_eq!(duplication_status(30.0), Status::Fail);
 }
 

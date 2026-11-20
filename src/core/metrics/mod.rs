@@ -282,7 +282,7 @@ impl Agg {
         self.n_bases += n_count;
 
         // FastQC averages Phred scores arithmetically for short reads.
-        let mean_q = (sum_q + (len as u64 / 2)) / len as u64;
+        let mean_q = sum_q / len as u64;
         self.per_seq_mean_q_hist[(mean_q as usize).min(MAX_Q)] += 1;
 
         let gc_percent = ((gc * 100) + (len as u64 / 2)) / len as u64;
@@ -743,12 +743,13 @@ impl Agg {
                     .per_seq_mean_q_hist
                     .iter()
                     .enumerate()
+                    .rev()
                     .max_by_key(|(_, c)| **c)
                     .map(|(q, _)| q)
                     .unwrap_or(0);
-                if mode_q < 20 {
+                if mode_q <= 20 {
                     Status::Fail
-                } else if mode_q < 27 {
+                } else if mode_q <= 27 {
                     Status::Warn
                 } else {
                     Status::Pass

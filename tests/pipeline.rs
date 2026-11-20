@@ -145,6 +145,17 @@ fn basic_gc_uses_called_bases_and_truncates_like_fastqc() {
 }
 
 #[test]
+fn sequence_quality_uses_the_lower_modal_score_and_inclusive_thresholds() {
+    let path = scratch("sequence_quality_thresholds").join("reads.fastq");
+    for (quality, status) in [("56", "fail"), ("<=", "warn")] {
+        let input = format!("@first\nAC\n+\n{quality}\n@second\nAC\n+\nII\n");
+        std::fs::write(&path, input).unwrap();
+        let text = render_data_txt(&path, 1, Mode::Short);
+        assert!(text.contains(&format!(">>Per sequence quality scores\t{status}\n")));
+    }
+}
+
+#[test]
 fn adapter_content_includes_ambiguous_bases_in_position_coverage() {
     let path = scratch("adapter_ambiguous").join("reads.fastq");
     std::fs::write(

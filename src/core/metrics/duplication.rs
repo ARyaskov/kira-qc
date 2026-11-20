@@ -296,14 +296,13 @@ pub struct DuplicationSummary {
     pub distinct_reads: u64,
 }
 
-/// FastQC status thresholds: warn when more than 20 % of the library is
+/// FastQC status thresholds: warn when more than 30 % of the library is
 /// duplicated, fail beyond 50 %.
 pub fn duplication_status(total_deduplicated_percent: f64) -> crate::core::model::Status {
     use crate::core::model::Status;
-    let duplicated = 100.0 - total_deduplicated_percent;
-    if duplicated > 50.0 {
+    if total_deduplicated_percent < 50.0 {
         Status::Fail
-    } else if duplicated > 20.0 {
+    } else if total_deduplicated_percent < 70.0 {
         Status::Warn
     } else {
         Status::Pass

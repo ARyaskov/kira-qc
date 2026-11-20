@@ -153,9 +153,9 @@ impl PerTileQual {
                 }
                 let deviation =
                     tile_sum as f64 / tile_count as f64 - all_sum as f64 / all_count as f64;
-                if deviation < -5.0 {
+                if deviation.abs() > 10.0 {
                     status = Status::Fail;
-                } else if deviation < -2.0 && status != Status::Fail {
+                } else if deviation.abs() > 5.0 && status != Status::Fail {
                     status = Status::Warn;
                 }
                 rows.push(PerTileRow {
@@ -242,8 +242,9 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert!((rows[0].mean_deviation + 5.0).abs() < 1e-9);
         assert!((rows[2].mean_deviation - 5.0).abs() < 1e-9);
-        // FastQC fails below -5, so exactly -5 is a warning.
-        assert_eq!(status, Status::Warn);
+        assert_eq!(status, Status::Pass);
+        p.add(1, &[b'!' + 14, b'!' + 14], 33);
+        assert_eq!(p.rows(&groups).1, Status::Warn);
     }
 
     #[test]
