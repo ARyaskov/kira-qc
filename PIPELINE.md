@@ -2,82 +2,122 @@
 
 ## Overview
 
-kira-qc performs FastQC-style quality control for high-throughput sequencing data. It targets short-read Illumina libraries by default and provides a dedicated long-read mode for ONT/PacBio data to avoid misleading per-base summaries.
+kira-qc performs FastQC-style quality control for high-throughput sequencing
+data. It targets short-read Illumina libraries by default and has a long-read
+mode for ONT and PacBio data that avoids the misleading per-base summaries
+FastQC would produce there.
 
 ## Input formats
 
 - FASTQ (plain text)
-- FASTQ.GZ (gzip-compressed FASTQ)
+- FASTQ.GZ (gzip)
+- BGZF
+- stdin, selected by passing `-` as the file name
 
-Quality scores are interpreted as Phred values. The Phred offset can be fixed (33 or 64) or auto-detected from an initial subset of reads.
+Quality scores are interpreted as Phred values. The offset can be fixed at 33 or
+64 or detected automatically.
 
 ## Processing pipeline
 
 ### 1) Input detection and opening
-**Input:** file path  
-**Output:** byte stream source  
-**Purpose:** select the appropriate reader based on file extension or magic bytes.  
+**Input:** file path or stdin
+**Output:** record stream
+**Purpose:** pick a backend from the file's magic bytes.
 
-Plain FASTQ is memory-mapped for zero-copy access. FASTQ.GZ uses streaming decompression with bounded buffering.
+Plain FASTQ is memory-mapped. Gzip and BGZF use streaming decompression with
+bounded buffering. A stdin stream is read through a buffered reader.
 
-### 2) Phred encoding detection
-**Input:** initial read subset  
-**Output:** selected Phred offset  
-**Purpose:** determine whether quality scores are Phred+33 or Phred+64 (unless fixed by CLI).  
+### 2) Chunking and encoding detection
+**Input:** record stream
+**Output:** packed record chunks carrying a global read index and the Phred offset
+**Purpose:** split the input into bounded chunks and settle the quality encoding.
 
-### 3) Chunking and parallel parsing
-**Input:** byte stream  
-**Output:** FASTQ record chunks  
-**Purpose:** split input into bounded chunks that align with FASTQ 4-line records and distribute work across threads.  
+The producer thread packs `seq||qual` pairs into 2 MiB chunks and parses the
+flowcell tile out of the read header when the header format carries one. Tile
+parsing stops after the first chunk if no read had one.
 
-The producer thread emits ordered chunks to a bounded channel. Worker threads parse reads and accumulate per-chunk metrics without global locks.
+Encoding detection runs on the records of the first chunk and the result travels
+with every chunk, so the input is read exactly once and workers need no
+synchronisation. Detection defaults to Phred+33 and requires positive evidence
+before selecting Phred+64: any byte below `;` rules out Phred+64, and any byte
+above the Phred+64 ceiling rules it out as well, which keeps high-quality
+NovaSeq and PacBio HiFi data from being shifted by 31.
 
-### 4) Core QC aggregation
-**Input:** parsed reads  
-**Output:** per-chunk metric aggregates  
-**Purpose:** compute streaming, mergeable summaries of base composition, quality distributions, GC, N content, and length statistics.  
+### 3) Parallel aggregation
+**Input:** record chunks
+**Output:** per-worker metric aggregates
+**Purpose:** compute streaming, mergeable summaries without global locks.
 
-SIMD-accelerated kernels are used on x86_64 (AVX2) and aarch64 (NEON) where applicable.
+Short-read processing makes one fused pass over each read that fills the
+per-position quality histograms and base counts, the GC and N totals and the
+read's mean quality. Long-read processing uses SIMD base counting and a
+per-read quality histogram, from which the mean error probability is derived.
 
-### 5) Specialized modules
-**Input:** parsed reads  
-**Output:** module-specific aggregates  
-**Purpose:** compute heavier QC modules with bounded memory:
+### 4) Specialised modules
+**Input:** parsed reads
+**Output:** module-specific aggregates
 
-- Sequence Duplication Levels (streaming heavy-hitter estimates)
-- Overrepresented Sequences (top-K with source heuristics)
-- Adapter Content (multi-pattern matching with SIMD prefilter)
-- K-mer Content (short-read only; CMS + heavy-hitter tracking)
+- **Duplication and overrepresentation** share one exact sequence table, as they
+  do in FastQC. Sequences longer than 75 bp are truncated to 50 bp before
+  hashing. Counting covers the first `--dup-window` reads; because the window is
+  a prefix defined by global read index, the result does not depend on how
+  chunks were distributed.
+- **Adapter Content** matches 12 bp adapter prefixes with a single Aho-Corasick
+  automaton in overlapping mode, so an adapter starting inside another adapter's
+  match is still reported. Long-read mode uses 20-28 bp probes and searches both
+  strands.
+- **Per tile sequence quality** accumulates quality sums per tile and position,
+  capped at 4096 tiles.
+- **K-mer Content** is opt-in and uses a rolling 2-bit encoding over ten
+  positional bins.
 
-### 6) Mode-specific behavior
-**Input:** aggregated metrics + mode  
-**Output:** final module set  
-**Purpose:** enable or disable modules based on sequencing technology:
+### 5) Deterministic reduction
+**Input:** per-worker aggregates
+**Output:** merged aggregate
+**Purpose:** combine partial results.
 
-- Short-read mode: full FastQC-style module set
-- Long-read mode: length-focused and per-read summaries; per-base modules disabled
+Every accumulator is a commutative, associative sum, so the merge order is
+irrelevant and the result is identical for any thread count.
 
-### 7) Deterministic reduction and finalization
-**Input:** per-chunk aggregates  
-**Output:** final metrics and module statuses  
-**Purpose:** merge partial results in chunk index order to ensure deterministic outputs across thread counts.
+### 6) Finalisation
+**Input:** merged aggregate
+**Output:** rows and statuses per module
+
+Per-position data is collapsed into FastQC's widening base groups: positions 1
+to 9 individually, then intervals that grow with read length. This keeps the
+report bounded for long reads, and it is the row format MultiQC expects.
+
+Statuses use FastQC's thresholds. Adapter percentages are divided by the number
+of reads that actually reach each position, so variable-length libraries are not
+diluted.
+
+### 7) Report writing
+**Input:** finalised metrics
+**Output:** report files
+
+All writers walk one shared module registry, so `fastqc_data.txt`, `summary.txt`,
+the HTML report and the JSON report can never disagree about which modules the
+run produced. Every interpolated string is escaped for its target format.
 
 ## Output artifacts
 
-- `fastqc_data.txt`: FastQC-style module sections and tabular data
-- `summary.txt`: one-line PASS/WARN/FAIL per module
+- `fastqc_data.txt`: FastQC 0.12-format module sections
+- `summary.txt`: one PASS/WARN/FAIL line per module
 - `fastqc_report.html`: self-contained HTML report
-- `{sample_name}_fastqc.zip`: ZIP bundle (unless `--no-zip`)
-- `latex/` (optional): LaTeX report with SVG/PDF figures and tables (`--export-latex`)
+- `kira_qc.json`: machine-readable report (`--json`)
+- `<sample>_fastqc.zip`: bundle of the above (unless `--no-zip`)
+- `latex/`: LaTeX report with SVG and PDF figures (`--export-latex`)
 
 ## Determinism and reproducibility
 
-All aggregation is mergeable and reduced in a fixed order by chunk index. 
-This ensures byte-identical outputs regardless of thread scheduling, which is critical for pipeline reproducibility and regression testing.
+Output is byte-identical across thread counts, including the ZIP bundle, which
+uses a fixed archive timestamp. `SOURCE_DATE_EPOCH` pins the report timestamp.
+A test compares full report hashes across 1, 2, 4 and 16 threads.
 
 ## Performance considerations
 
-- Memory-mapped I/O for plain FASTQ
-- Streaming decompression for FASTQ.GZ with bounded buffers
-- Bounded channels and worker-local aggregation to avoid global contention
-- SIMD acceleration for base counting and quality processing where available
+- The input is read once; encoding detection does not re-open or re-inflate it
+- Memory-mapped I/O for plain FASTQ, streaming decompression otherwise
+- 2 MiB chunks and a bounded channel keep peak memory proportional to threads
+- One fused pass per short read instead of separate counting passes
+- Worker-local aggregation with no shared mutable state

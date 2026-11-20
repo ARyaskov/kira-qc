@@ -2,19 +2,22 @@
 
 ## Project overview
 
-kira-qc is a FastQC-compatible QC tool written in Rust. It generates FastQC-style
-text and HTML/LaTeX reports from FASTQ/FASTQ.GZ input with deterministic, bounded-memory
-processing and SIMD-accelerated hot paths. It is designed for short-read Illumina
-QC with a dedicated long-read mode for ONT/PacBio data.
+kira-qc is a FastQC-compatible QC tool written in Rust. It reads FASTQ,
+FASTQ.GZ and BGZF input (or a stream on stdin) and writes FastQC-style text,
+HTML and LaTeX reports with deterministic, bounded-memory processing and
+SIMD-accelerated hot paths. It targets short-read Illumina QC and has a
+dedicated long-read mode for ONT and PacBio data.
 
 ## Key features
 
-- FastQC-compatible outputs: `fastqc_data.txt`, `summary.txt`, HTML, and ZIP bundle
-- FASTQ and FASTQ.GZ support
+- FastQC-compatible outputs: `fastqc_data.txt`, `summary.txt`, HTML and a ZIP bundle
+- MultiQC-parseable duplication and basic-statistics sections
+- FASTQ, FASTQ.GZ, BGZF and stdin input
 - Streaming, bounded memory processing
-- SIMD acceleration (AVX2 on x86_64, NEON on aarch64)
-- Deterministic multithreaded execution
+- SIMD acceleration (AVX2 on x86_64, NEON on aarch64, scalar fallback elsewhere)
+- Byte-identical output regardless of thread count
 - Short-read (Illumina) and long-read (ONT/PacBio) modes
+- Optional machine-readable JSON report
 
 ## Supported QC modules
 
@@ -22,160 +25,189 @@ QC with a dedicated long-read mode for ONT/PacBio data.
 |---|---|---|
 | Basic Statistics | Yes | Yes |
 | Per base sequence quality | Yes | No |
+| Per tile sequence quality | Yes, when headers carry tile numbers | No |
 | Per sequence quality scores | Yes | Yes |
 | Per base sequence content | Yes | No |
 | Per sequence GC content | Yes | Yes |
 | Per base N content | Yes | No |
-| Sequence Length Distribution | Yes | Yes (log-binned + N50/N90) |
+| Sequence Length Distribution | Yes | Yes (log-binned, exact N50/N90) |
 | Sequence Duplication Levels | Yes | No |
 | Overrepresented Sequences | Yes | No |
-| Adapter Content | Yes | Yes (summary only) |
-| K-mer Content (k=7) | Yes | No |
+| Adapter Content | Yes | Yes (presence, both strands) |
+| K-mer Content (k=7) | Opt-in via `--kmers` | No |
 | Per sequence N content | No | Yes |
 
 ## Installation
 
-Install from crates.io (Rust 1.95+ / Windows / Linux / macOS):
+Install from crates.io (Windows / Linux / macOS):
 
 ```bash
 cargo install kira-qc
 ```
 
-Or
+From source:
 
-From source (Rust 1.95+):
-
-```
-# build
+```bash
 cargo build --release
-
-# run
-./target/release/kira-qc --help
 ```
 
-Notes:
-- On x86_64, AVX2 is required at runtime.
-- On aarch64 (e.g., Apple Silicon), NEON kernels are used.
-- Optional build feature to disable K-mer Content (compile-time):
-  - `cargo build --release --features no-kmer`
+Build options:
+
+- `--no-default-features` drops the LaTeX/PDF export and cuts the dependency
+  tree from 107 crates to 46.
+- `--features no-kmer` strips the K-mer module at compile time. It is already
+  off at runtime unless `--kmers` is given.
+
+The default build needs no C toolchain: the ZIP writer uses only the pure-Rust
+deflate backend.
+
+The minimum supported Rust version is 1.95. kira-qc's own code compiles on
+1.88; the higher floor comes from the `kira-fastq` dependency, which declares
+`rust-version = "1.95"`. Conda and HPC environments that pin an older toolchain
+need that dependency to relax its MSRV first.
 
 ## Usage
 
-Basic FASTQ:
+kira-qc accepts the same invocation shape as `fastqc`:
 
+```bash
+kira-qc reads.fastq.gz -o qc/
 ```
+
+The `run` subcommand from earlier versions still works:
+
+```bash
 kira-qc run reads.fastq --out qc/
 ```
 
-FASTQ.GZ:
+Several files at once:
 
-```
-kira-qc run reads.fastq.gz --out qc/
-```
-
-Short-read (default):
-
-```
-kira-qc run reads.fastq.gz --out qc/ --mode short
+```bash
+kira-qc sample1.fastq.gz sample2.fastq.gz -o qc/ -t 8
 ```
 
-Long-read:
+From a pipe, which is how to handle formats kira-qc does not read natively:
 
-```
-kira-qc run reads.fastq.gz --out qc/ --mode long
+```bash
+samtools fastq input.bam | kira-qc - -o qc/ --sample-name input
 ```
 
-LaTeX export (supplement):
+Long reads:
 
-```
-kira-qc run reads.fastq.gz --out qc/ --export-latex supplement
+```bash
+kira-qc reads.fastq.gz -o qc/ --mode long
 ```
 
 ## CLI options
 
 | Option | Description | Default |
 |---|---|---|
-| `run` | Run QC on a single FASTQ/FASTQ.GZ file | Required |
-| `--out <DIR>` | Output directory | Required |
-| `--threads <N>` | Number of worker threads | Logical CPU count |
-| `--sample-name <NAME>` | Sample name (used in output folder/ZIP) | Input file stem |
-| `--phred-offset auto\|33\|64` | Quality encoding detection or fixed offset | `auto` |
-| `--mode short\|long` | QC mode: short-read or long-read | `short` |
-| `--no-zip` | Disable ZIP bundle creation | Off (ZIP enabled) |
-| `--export-latex summary\|supplement` | Generate LaTeX export | Disabled |
+| `<FASTQ>...` | One or more input files, or `-` for stdin | Required |
+| `-o`, `--outdir <DIR>` | Output directory (alias `--out`) | Directory of the input file |
+| `-t`, `--threads <N>` | Worker threads | Logical CPU count |
+| `--sample-name <NAME>` | Sample name; single input only | Input file stem |
+| `--phred-offset auto\|33\|64` | Quality encoding | `auto` |
+| `--mode short\|long` | Sequencing technology profile | `short` |
+| `--nogroup` | One row per base instead of base groups | Off |
+| `-k`, `--kmers` | Enable the K-mer Content module | Off |
+| `--dup-window <N>` | Reads used for duplication estimates, 0 = all | 1000000 |
+| `--no-zip` | Do not create the ZIP bundle | Off |
+| `--noextract` | Keep only the ZIP, remove the directory | Off |
+| `--extract` | Keep the directory (the default) | On |
+| `-a`, `--adapters <FILE>` | Custom adapter list | Built-in list |
+| `-c`, `--contaminants <FILE>` | Custom contaminant list | Built-in list |
+| `-l`, `--limits <FILE>` | FastQC limits file; `ignore` directives only | None |
+| `-f`, `--format fastq\|bam\|sam` | Input format | `fastq` |
+| `--json` | Also write `kira_qc.json` | Off |
+| `--export-latex summary\|supplement` | LaTeX export | Off |
+| `-q`, `--quiet` | Suppress warnings | Off |
+
+Adapter and contaminant files use FastQC's format: `name<TAB>sequence`, with
+`#` starting a comment.
 
 ## Output description
 
-Output directory structure:
-
 ```
-<out>/<sample_name>_fastqc/
+<out>/<sample>_fastqc/
   fastqc_data.txt
   summary.txt
   fastqc_report.html
-  latex/ (if --export-latex)
-<out>/<sample_name>_fastqc.zip
+  kira_qc.json      (with --json)
+  latex/            (with --export-latex)
+<out>/<sample>_fastqc.zip
 ```
 
-- `fastqc_data.txt`: FastQC-style module sections and tabular data.
-- `summary.txt`: One-line PASS/WARN/FAIL status per module.
-- `fastqc_report.html`: Self-contained HTML report (no external assets).
-- `{sample_name}_fastqc.zip`: ZIP bundle of the output directory (unless `--no-zip`).
-- `latex/`: LaTeX export (optional), including SVG figures and `kira_qc.tex`.
+The sample name strips both the compression suffix and the FASTQ suffix, so
+`sample.fastq.gz` produces `sample_fastqc`, matching FastQC and the wrappers
+that expect that layout.
 
-## LaTeX export for publications
+## FastQC compatibility
 
-kira-qc can generate an article-ready LaTeX report alongside the HTML output.
-Use `--export-latex summary` for a concise figure set or `--export-latex supplement`
-for a full module-by-module report. PDF figures are generated directly.
+- `fastqc_data.txt` starts with a `##FastQC 0.12.1` header line and uses
+  FastQC's module titles, base groups and status vocabulary.
+- Basic Statistics includes `Total Bases` and `Sequences flagged as poor
+  quality`, both of which MultiQC reads.
+- Sequence Duplication Levels emits `#Total Deduplicated Percentage` and the
+  `Percentage of deduplicated` / `Percentage of total` columns over FastQC's 16
+  duplication levels, which is what MultiQC's duplication plot and the "% Dups"
+  General Statistics column need.
+- Adapter Content columns are adapter names, matching FastQC's 12 bp probe list
+  (Illumina Universal, Small RNA 3' and 5', Nextera, PolyA, PolyG).
+- Module statuses use FastQC's thresholds: lower quartile and median for per
+  base quality, the distribution mode for per sequence quality, |A-T| and |G-C|
+  imbalance for per base content, a fitted normal for per sequence GC, and 0.1 %
+  / 1 % for overrepresented sequences.
 
-LaTeX artifacts are written under:
+Known differences:
 
-```
-<out>/<sample_name>_fastqc/latex/
-```
-
-For Overleaf upload (Upload Project Overleaf feature), a ready-to-use ZIP is created:
-
-```
-<out>/<sample_name>_fastqc/latex/kira_qc_latex.zip
-```
+- Duplication and overrepresentation are estimated from the first
+  `--dup-window` reads (one million by default) and counted exactly within that
+  window, rather than from the first 100 000 distinct sequences of the whole
+  file. The report states the window when it is not the whole file.
+- `--limits` honours `ignore` directives; threshold overrides are reported as
+  unsupported rather than silently dropped.
+- BAM, CRAM and SAM are not read natively. Pipe them through `samtools fastq`.
+- Long-read mode is deliberately not FastQC-compatible.
 
 ## Determinism and reproducibility
 
-kira-qc produces identical results regardless of thread count or scheduling.
-All aggregation is deterministic and merged by chunk index. This ensures that
-pipelines can rely on stable outputs for regression tests and reproducible QC.
+kira-qc produces byte-identical output regardless of thread count. Every
+aggregate is order-independent, and the duplication window is a prefix of the
+file defined by global read index rather than by whichever worker saw a read.
+Set `SOURCE_DATE_EPOCH` to pin the report timestamp; the ZIP bundle already uses
+a fixed archive timestamp. This is covered by a test that compares full report
+hashes across 1, 2, 4 and 16 threads.
 
 ## Performance notes
 
-- Streaming design with bounded memory for large inputs
-- SIMD acceleration for base counting and quality processing
-- Adapter matching includes a SIMD prefix prefilter before full pattern matching
+- The input is read exactly once. Quality-encoding detection runs on the first
+  chunk, so a gzip file is never inflated twice.
+- Short-read processing makes a single fused pass over sequence and quality that
+  fills the per-position accumulators, base composition and mean quality.
+- Chunks are 2 MiB and the producer-worker channel is bounded, so peak memory
+  stays proportional to the thread count rather than growing with it.
+- Adapter matching uses one Aho-Corasick automaton with overlapping search.
 
 ## Long-read mode notes
 
 FastQC's per-base modules assume uniform read length and are not appropriate for
-ONT/PacBio data. Long-read mode disables those plots and instead focuses on:
-- Log-binned length distribution with N50/N90
-- Per-read quality scores
+ONT or PacBio data. Long-read mode disables them and instead reports:
+
+- Log-binned length distribution with exact N50, N90, median and mean
+- Per-read quality, averaged over error probabilities rather than Phred scores,
+  which is the convention used by NanoPlot and related tools
 - Per-read GC content
 - Per-read N content
-- Adapter presence summary
-
-## FastQC compatibility notes
-
-- Drop-in replacement for FastQC in short-read pipelines
-- Output formats and module names follow FastQC conventions
-- Some heuristics (e.g., duplication, k-mer content) are approximate by design
+- Presence of ONT ligation, ONT rapid and PacBio SMRTbell adapters, searched on
+  both strands
 
 ## Limitations
 
-- FASTQ/FASTQ.GZ input only (no BAM/CRAM)
+- FASTQ, FASTQ.GZ, BGZF and stdin only; no native BAM/CRAM
+- Compression other than gzip and BGZF must be piped in
 - No GPU acceleration
-- Long-read mode is not FastQC-compatible by design
+- Paired-end files are analysed independently, not as pairs
 
 ## License
 
-MIT,
-See `LICENSE`.
+MIT. See `LICENSE`.
