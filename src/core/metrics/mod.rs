@@ -456,9 +456,14 @@ impl Agg {
         } else {
             self.length_hist.max_len()
         };
-        let gc_percent = ((self.gc_bases * 100) + (self.total_bases / 2))
-            .checked_div(self.total_bases)
-            .unwrap_or(0) as u32;
+        let gc_percent = if ctx.mode == Mode::Short {
+            let called = self.per_pos_base.iter().map(BaseCounts::called).sum();
+            (self.gc_bases * 100).checked_div(called).unwrap_or(0)
+        } else {
+            ((self.gc_bases * 100) + self.total_bases / 2)
+                .checked_div(self.total_bases)
+                .unwrap_or(0)
+        } as u32;
 
         let basic = BasicStats {
             file_type: "Conventional base calls",

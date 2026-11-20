@@ -134,6 +134,17 @@ fn partial_duplication_window_keeps_fastqc_headers_tabular() {
 }
 
 #[test]
+fn basic_gc_uses_called_bases_and_truncates_like_fastqc() {
+    let path = scratch("basic_gc").join("reads.fastq");
+    std::fs::write(&path, "@one\nGCAANN\n+\nIIIIII\n@two\nGNNN\n+\nIIII\n").unwrap();
+    let text = render_data_txt(&path, 1, Mode::Short);
+    assert!(text.contains("\n%GC\t60\n"), "{text}");
+    std::fs::write(&path, "@one\nGCAAAAN\n+\nIIIIIII\n").unwrap();
+    let text = render_data_txt(&path, 1, Mode::Short);
+    assert!(text.contains("\n%GC\t33\n"), "{text}");
+}
+
+#[test]
 fn per_tile_module_appears_only_with_illumina_headers() {
     let dir = scratch("per_tile");
 
