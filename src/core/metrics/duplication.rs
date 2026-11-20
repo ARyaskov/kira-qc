@@ -80,6 +80,7 @@ struct Slot {
 pub struct SeqTracker {
     distinct_cap: usize,
     index: FxHashMap<u64, u32>,
+    collisions: FxHashMap<u32, Vec<u32>>,
     slots: Vec<Slot>,
     /// Packed storage for the truncated sequences; avoids one allocation per slot.
     arena: Vec<u8>,
@@ -100,6 +101,7 @@ impl SeqTracker {
         Self {
             distinct_cap: DUP_DISTINCT_CAP,
             index: FxHashMap::default(),
+            collisions: FxHashMap::default(),
             slots: Vec::new(),
             arena: Vec::new(),
             observed_reads: 0,
@@ -113,6 +115,7 @@ impl SeqTracker {
         Self {
             distinct_cap: DUP_DISTINCT_CAP,
             index: FxHashMap::with_capacity_and_hasher(entries, Default::default()),
+            collisions: FxHashMap::default(),
             slots: Vec::with_capacity(entries),
             arena: Vec::with_capacity(entries * DUP_TRUNCATE_TO),
             observed_reads: 0,
@@ -148,34 +151,58 @@ impl SeqTracker {
     /// Record one read. `read_index` is the read's global position in the file.
     pub fn add(&mut self, seq: &[u8], read_index: u64) {
         let truncated = truncate(seq);
-        let hash = hash_seq(truncated);
+        let mut buffer = [0; DUP_TRUNCATE_OVER];
+        let canonical = &mut buffer[..truncated.len()];
+        canonical.copy_from_slice(truncated);
+        canonical.make_ascii_uppercase();
+        let hash = xxhash_rust::xxh3::xxh3_64(canonical);
         self.observed_reads += 1;
+        self.add_count(canonical, hash, 1, read_index);
+    }
 
-        if let Some(&slot) = self.index.get(&hash) {
-            let s = &mut self.slots[slot as usize];
-            s.count += 1;
-            if read_index < s.first_index {
-                s.first_index = read_index;
+    fn sequence(&self, slot: Slot) -> &[u8] {
+        &self.arena[slot.seq_off as usize..slot.seq_off as usize + slot.seq_len as usize]
+    }
+
+    fn add_count(&mut self, seq: &[u8], hash: u64, count: u64, first_index: u64) {
+        let primary = self.index.get(&hash).copied();
+        let existing = primary.and_then(|slot| {
+            if self.sequence(self.slots[slot as usize]) == seq {
+                return Some(slot);
             }
+            self.collisions
+                .get(&slot)?
+                .iter()
+                .copied()
+                .find(|&idx| self.sequence(self.slots[idx as usize]) == seq)
+        });
+        if let Some(slot) = existing {
+            let s = &mut self.slots[slot as usize];
+            s.count += count;
+            s.first_index = s.first_index.min(first_index);
             return;
         }
 
         if self.slots.len() >= self.distinct_cap {
-            self.dropped_reads += 1;
+            self.dropped_reads += count;
             return;
         }
 
         let seq_off = self.arena.len() as u32;
-        self.arena.extend_from_slice(truncated);
+        self.arena.extend_from_slice(seq);
         let idx = self.slots.len() as u32;
         self.slots.push(Slot {
             hash,
-            count: 1,
-            first_index: read_index,
+            count,
+            first_index,
             seq_off,
-            seq_len: truncated.len() as u16,
+            seq_len: seq.len() as u16,
         });
-        self.index.insert(hash, idx);
+        if let Some(primary) = primary {
+            self.collisions.entry(primary).or_default().push(idx);
+        } else {
+            self.index.insert(hash, idx);
+        }
     }
 
     pub fn merge(&mut self, other: &SeqTracker) {
@@ -192,33 +219,7 @@ impl SeqTracker {
 
         for i in order {
             let s = other.slots[i as usize];
-            let seq = &other.arena[s.seq_off as usize..s.seq_off as usize + s.seq_len as usize];
-            match self.index.get(&s.hash) {
-                Some(&slot) => {
-                    let target = &mut self.slots[slot as usize];
-                    target.count += s.count;
-                    if s.first_index < target.first_index {
-                        target.first_index = s.first_index;
-                    }
-                }
-                None => {
-                    if self.slots.len() >= self.distinct_cap {
-                        self.dropped_reads += s.count;
-                        continue;
-                    }
-                    let seq_off = self.arena.len() as u32;
-                    self.arena.extend_from_slice(seq);
-                    let idx = self.slots.len() as u32;
-                    self.slots.push(Slot {
-                        hash: s.hash,
-                        count: s.count,
-                        first_index: s.first_index,
-                        seq_off,
-                        seq_len: s.seq_len,
-                    });
-                    self.index.insert(s.hash, idx);
-                }
-            }
+            self.add_count(other.sequence(s), s.hash, s.count, s.first_index);
         }
     }
 
@@ -318,23 +319,42 @@ pub fn truncate(seq: &[u8]) -> &[u8] {
     }
 }
 
-/// Case-folded hash. Folding with `& 0xDF` maps lowercase ACGT onto uppercase.
+/// Case-folded hash of ASCII sequence bytes.
 #[inline]
 pub fn hash_seq(seq: &[u8]) -> u64 {
     let mut buf: [u8; 128] = [0; 128];
     if seq.len() <= buf.len() {
         for (i, &b) in seq.iter().enumerate() {
-            buf[i] = b & 0xDF;
+            buf[i] = b.to_ascii_uppercase();
         }
         return xxhash_rust::xxh3::xxh3_64(&buf[..seq.len()]);
     }
-    let folded: Vec<u8> = seq.iter().map(|&b| b & 0xDF).collect();
+    let folded = seq.to_ascii_uppercase();
     xxhash_rust::xxh3::xxh3_64(&folded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merged_counts_keep_canonical_spelling_and_distinct_hash_collisions() {
+        let mut a = SeqTracker::new();
+        let mut b = SeqTracker::new();
+        a.add(b"acgt", 0);
+        b.add(b"ACGT", 1);
+        let forced_hash = hash_seq(b"ACGT");
+        b.add_count(b"AAAA", forced_hash, 1, 2);
+        a.add_count(b"AAAA", forced_hash, 2, 3);
+        let mut ab = a.clone();
+        ab.merge(&b);
+        b.merge(&a);
+        assert_eq!(ab.entries_sorted(), b.entries_sorted());
+        assert_eq!(
+            ab.entries_sorted(),
+            vec![(b"AAAA".as_slice(), 3, 2), (b"ACGT", 2, 0)]
+        );
+    }
 
     #[test]
     fn a_distinct_limit_overflow_invalidates_direct_and_merged_counts() {
