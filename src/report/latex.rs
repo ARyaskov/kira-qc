@@ -1,7 +1,7 @@
 use crate::core::metrics::{BasicStats, FinalMetrics};
 use crate::core::model::{FinalizeContext, Mode, Status};
-use crate::report::html;
 use crate::report::zip::{deterministic_time, list_files_recursive};
+use crate::report::{ModuleId, active_modules, html};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
@@ -30,12 +30,16 @@ pub fn write(
     fs::create_dir_all(&figures_dir)?;
     fs::create_dir_all(&tables_dir)?;
 
-    write_basic_stats_table(&tables_dir, metrics, &ctx.file_name)?;
+    let active = active_modules(metrics, ctx);
+    let basic = active.contains(&ModuleId::Basic);
+    if basic {
+        write_basic_stats_table(&tables_dir, metrics, &ctx.file_name)?;
+    }
 
-    let figures = collect_figures(metrics, ctx, mode)?;
+    let figures = collect_figures(metrics, ctx, mode, &active)?;
     write_figures(&figures_dir, &figures)?;
     write_readme(&latex_dir)?;
-    write_tex(&latex_dir, &ctx.file_name, ctx.mode, mode, &figures)?;
+    write_tex(&latex_dir, &ctx.file_name, ctx.mode, mode, &figures, basic)?;
     write_latex_zip(&latex_dir)?;
     Ok(())
 }
@@ -54,148 +58,89 @@ fn collect_figures(
     metrics: &FinalMetrics,
     ctx: &FinalizeContext,
     mode: LatexMode,
+    active: &[ModuleId],
 ) -> Result<Vec<Figure>> {
-    let mut figures: Vec<Figure> = Vec::new();
-
-    match (ctx.mode, mode) {
+    use ModuleId::*;
+    let selected = match (ctx.mode, mode) {
         (Mode::Short, LatexMode::Summary) => {
-            figures.push(fig(
-                "per_base_quality",
-                "Per base sequence quality",
-                html::latex_svg_per_base_quality(metrics)?,
-            ));
-            figures.push(fig(
-                "per_sequence_quality",
-                "Per sequence quality scores",
-                html::latex_svg_per_seq_quality(metrics)?,
-            ));
-            figures.push(fig(
-                "duplication_levels",
-                "Sequence duplication levels",
-                html::latex_svg_duplication(metrics)?,
-            ));
-            if metrics.statuses.adapter_content != Status::Pass {
-                figures.push(fig(
-                    "adapter_content",
-                    "Adapter content",
-                    html::latex_svg_adapter_content(metrics)?,
-                ));
-            }
+            &[PerBaseQual, PerSeqQual, Duplication, AdapterContent][..]
         }
-        (Mode::Long, LatexMode::Summary) => {
-            figures.push(fig(
-                "sequence_length_distribution",
-                "Sequence length distribution",
-                html::latex_svg_length_dist(metrics)?,
-            ));
-            figures.push(fig(
-                "per_sequence_quality",
-                "Per sequence quality scores",
-                html::latex_svg_per_seq_quality(metrics)?,
-            ));
-            if metrics.statuses.adapter_content != Status::Pass {
-                figures.push(fig(
-                    "adapter_content",
-                    "Adapter content",
-                    html::latex_svg_adapter_content(metrics)?,
-                ));
-            }
-        }
-        (Mode::Short, LatexMode::Supplement) => {
-            figures.push(fig(
-                "per_base_quality",
-                "Per base sequence quality",
-                html::latex_svg_per_base_quality(metrics)?,
-            ));
-            if metrics.per_tile_available {
-                figures.push(fig(
-                    "per_tile_quality",
-                    "Per tile sequence quality",
-                    html::latex_svg_per_tile(metrics)?,
-                ));
-            }
-            figures.extend([
-                fig(
+        (Mode::Long, LatexMode::Summary) => &[LengthDist, PerSeqQual, AdapterContent][..],
+        (_, LatexMode::Supplement) => active,
+    };
+    selected
+        .iter()
+        .copied()
+        .filter(|module| *module != Basic && active.contains(module))
+        .filter(|module| {
+            !matches!(mode, LatexMode::Summary)
+                || *module != AdapterContent
+                || metrics.statuses.adapter_content != Status::Pass
+        })
+        .map(|module| {
+            let (name, caption, render): (_, _, fn(&FinalMetrics) -> Result<String>) = match module
+            {
+                Basic => unreachable!("basic statistics are rendered as a table"),
+                PerBaseQual => (
+                    "per_base_quality",
+                    "Per base sequence quality",
+                    html::latex_svg_per_base_quality,
+                ),
+                PerSeqQual => (
                     "per_sequence_quality",
                     "Per sequence quality scores",
-                    html::latex_svg_per_seq_quality(metrics)?,
+                    html::latex_svg_per_seq_quality,
                 ),
-                fig(
-                    "per_base_content",
-                    "Per base sequence content",
-                    html::latex_svg_per_base_content(metrics)?,
-                ),
-                fig(
-                    "per_sequence_gc",
-                    "Per sequence GC content",
-                    html::latex_svg_per_seq_gc(metrics)?,
-                ),
-                fig(
-                    "per_base_n",
-                    "Per base N content",
-                    html::latex_svg_per_base_n(metrics)?,
-                ),
-                fig(
-                    "sequence_length_distribution",
-                    "Sequence length distribution",
-                    html::latex_svg_length_dist(metrics)?,
-                ),
-                fig(
+                Duplication => (
                     "duplication_levels",
                     "Sequence duplication levels",
-                    html::latex_svg_duplication(metrics)?,
+                    html::latex_svg_duplication,
                 ),
-                fig(
-                    "overrepresented_sequences",
-                    "Overrepresented sequences",
-                    html::latex_svg_overrep(metrics)?,
-                ),
-                fig(
+                AdapterContent => (
                     "adapter_content",
                     "Adapter content",
-                    html::latex_svg_adapter_content(metrics)?,
+                    html::latex_svg_adapter_content,
                 ),
-            ]);
-            if ctx.kmer_enabled {
-                figures.push(fig(
-                    "kmer_content",
-                    "Kmer content",
-                    html::latex_svg_kmer_content(metrics)?,
-                ));
-            }
-        }
-        (Mode::Long, LatexMode::Supplement) => {
-            figures.extend([
-                fig(
+                LengthDist => (
                     "sequence_length_distribution",
                     "Sequence length distribution",
-                    html::latex_svg_length_dist(metrics)?,
+                    html::latex_svg_length_dist,
                 ),
-                fig(
-                    "per_sequence_quality",
-                    "Per sequence quality scores",
-                    html::latex_svg_per_seq_quality(metrics)?,
+                PerTile => (
+                    "per_tile_quality",
+                    "Per tile sequence quality",
+                    html::latex_svg_per_tile,
                 ),
-                fig(
+                PerBaseContent => (
+                    "per_base_content",
+                    "Per base sequence content",
+                    html::latex_svg_per_base_content,
+                ),
+                PerSeqGc => (
                     "per_sequence_gc",
                     "Per sequence GC content",
-                    html::latex_svg_per_seq_gc(metrics)?,
+                    html::latex_svg_per_seq_gc,
                 ),
-                fig(
+                PerBaseN => (
+                    "per_base_n",
+                    "Per base N content",
+                    html::latex_svg_per_base_n,
+                ),
+                Overrepresented => (
+                    "overrepresented_sequences",
+                    "Overrepresented sequences",
+                    html::latex_svg_overrep,
+                ),
+                KmerContent => ("kmer_content", "Kmer content", html::latex_svg_kmer_content),
+                PerSeqN => (
                     "per_sequence_n",
                     "Per sequence N content",
-                    html::latex_svg_per_seq_n(metrics)?,
+                    html::latex_svg_per_seq_n,
                 ),
-                fig(
-                    "adapter_content",
-                    "Adapter content",
-                    html::latex_svg_adapter_content(metrics)?,
-                ),
-            ]);
-        }
-    }
-
-    Ok(figures)
+            };
+            Ok(fig(name, caption, render(metrics)?))
+        })
+        .collect()
 }
 
 fn write_figures(dir: &Path, figures: &[Figure]) -> Result<()> {
@@ -252,6 +197,7 @@ fn write_tex(
     mode: Mode,
     export_mode: LatexMode,
     figures: &[Figure],
+    basic: bool,
 ) -> Result<()> {
     let mut out = String::new();
     out.push_str("\\documentclass{article}\n");
@@ -282,8 +228,10 @@ fn write_tex(
         "\\textbf{{Tool:}} kira-qc {}\n",
         escape_tex(crate::KIRA_QC_VERSION)
     ));
-    out.push_str("\\section*{Basic statistics}\n");
-    out.push_str("\\input{tables/basic_statistics.tex}\n");
+    if basic {
+        out.push_str("\\section*{Basic statistics}\n");
+        out.push_str("\\input{tables/basic_statistics.tex}\n");
+    }
 
     match export_mode {
         LatexMode::Summary => {

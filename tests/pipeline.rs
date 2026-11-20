@@ -744,3 +744,33 @@ fn json_module_data_follows_each_ignore_directive_independently() {
     assert!(!json.contains("\"adapter_content\": ["));
     assert!(!json.contains("\"per_sequence_gc\": ["));
 }
+
+#[cfg(feature = "latex")]
+#[test]
+fn latex_uses_active_modules_for_both_export_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("reads.fastq");
+    write_fastq(&input, 10, false);
+    let limits = root.path().join("limits.txt");
+    std::fs::write(&limits, "duplication ignore 1\nbasic_statistics ignore 1\n").unwrap();
+    for mode in ["summary", "supplement"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+            .arg(&input)
+            .args(["--quiet", "--no-zip", "--export-latex", mode, "--limits"])
+            .arg(&limits)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let latex = root.path().join("reads_fastqc/latex");
+        let tex = std::fs::read_to_string(latex.join("kira_qc.tex")).unwrap();
+        assert!(tex.contains("figures/per_base_quality.pdf"));
+        assert!(!tex.contains("duplication_levels"));
+        assert!(!tex.contains("tables/basic_statistics.tex"));
+        assert!(!latex.join("figures/duplication_levels.pdf").exists());
+        assert!(!latex.join("tables/basic_statistics.tex").exists());
+    }
+}
