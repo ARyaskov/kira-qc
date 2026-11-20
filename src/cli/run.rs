@@ -6,6 +6,7 @@ use crate::core::stats::StatsLog;
 use crate::report;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ pub fn entry() -> Result<()> {
 }
 
 fn run(args: RunArgs) -> Result<()> {
-    preflight(&args)?;
+    let destinations = preflight(&args)?;
 
     let adapter_mode = match args.mode {
         ModeArg::Short => Mode::Short,
@@ -36,10 +37,11 @@ fn run(args: RunArgs) -> Result<()> {
         None => Vec::new(),
     };
 
-    for reads in &args.reads {
+    for (reads, destination) in args.reads.iter().zip(destinations) {
         run_one(
             reads,
             &args,
+            destination,
             adapter_mode,
             adapters.clone(),
             contaminants.clone(),
@@ -49,7 +51,7 @@ fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn preflight(args: &RunArgs) -> Result<()> {
+fn preflight(args: &RunArgs) -> Result<Vec<OutputDestination>> {
     if args.reads.is_empty() {
         bail!("no input files given; run `kira-qc --help` for usage");
     }
@@ -80,24 +82,73 @@ fn preflight(args: &RunArgs) -> Result<()> {
     }
 
     let mut seen_stdin = false;
+    let mut seen_outputs = HashSet::new();
+    let mut destinations = Vec::with_capacity(args.reads.len());
     for reads in &args.reads {
-        if reads.as_os_str() == "-" {
+        let is_stdin = reads.as_os_str() == "-";
+        if is_stdin {
             if seen_stdin {
                 bail!("stdin can only be read once");
             }
             seen_stdin = true;
-            continue;
-        }
-        if !reads.is_file() {
+        } else if !reads.is_file() {
             bail!("input file not found: {}", reads.display());
         }
+        let sample = match &args.sample_name {
+            Some(name) => name.clone(),
+            None if is_stdin => "stdin".to_string(),
+            None => sample_name_from_path(reads)
+                .context("failed to determine sample name from input file")?,
+        };
+        let root = match &args.out {
+            Some(dir) => dir.as_path(),
+            None if is_stdin => Path::new("."),
+            None => reads
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        };
+        let root = resolve_output_root(root)?;
+        let path = root.join(format!("{sample}_fastqc"));
+        #[cfg(windows)]
+        let key = path.to_string_lossy().to_lowercase();
+        #[cfg(not(windows))]
+        let key = path.clone();
+        if !seen_outputs.insert(key) {
+            bail!(
+                "multiple input files target the same report: {}",
+                path.display()
+            );
+        }
+        destinations.push(OutputDestination { root, sample });
     }
-    Ok(())
+    Ok(destinations)
+}
+
+struct OutputDestination {
+    root: PathBuf,
+    sample: String,
+}
+
+/// Resolve existing directories (including aliases) without creating output.
+fn resolve_output_root(path: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = std::path::absolute(path)?;
+            let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) else {
+                return Err(error).with_context(|| format!("cannot resolve {}", path.display()));
+            };
+            Ok(resolve_output_root(parent)?.join(name))
+        }
+        Err(error) => Err(error).with_context(|| format!("cannot resolve {}", path.display())),
+    }
 }
 
 fn run_one(
     reads: &Path,
     args: &RunArgs,
+    destination: OutputDestination,
     mode: Mode,
     adapters: Arc<AdapterSet>,
     contaminants: Arc<ContaminantList>,
@@ -113,19 +164,10 @@ fn run_one(
         Input::Path(reads.to_path_buf())
     };
 
-    let sample_name = match &args.sample_name {
-        Some(s) => s.clone(),
-        None if is_stdin => "stdin".to_string(),
-        None => sample_name_from_path(reads)
-            .context("failed to determine sample name from input file")?,
-    };
-
-    // FastQC writes next to the input file when no output directory is given.
-    let out_root = match &args.out {
-        Some(dir) => dir.clone(),
-        None if is_stdin => PathBuf::from("."),
-        None => reads.parent().unwrap_or(Path::new(".")).to_path_buf(),
-    };
+    let OutputDestination {
+        root: out_root,
+        sample: sample_name,
+    } = destination;
     let phred_offset = match args.phred_offset {
         PhredOffsetArg::Auto => PhredOffsetConfig::Auto,
         PhredOffsetArg::P33 => PhredOffsetConfig::Fixed(33),

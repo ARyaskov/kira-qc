@@ -301,6 +301,48 @@ fn noextract_preserves_existing_reports_and_rejects_path_sample_names() {
 }
 
 #[test]
+fn colliding_sample_outputs_fail_before_any_reports_are_written() {
+    use std::process::Command;
+
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("lane1/reads.fastq");
+    let second = root.path().join("lane2/reads.fq");
+    for path in [&first, &second] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_fastq(path, 10, false);
+    }
+    let outdir = root.path().join("new/qc");
+    let output = Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+        .args([&first, &second])
+        .args(["--quiet", "-t", "1", "-o"])
+        .arg(&outdir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("same report"));
+    assert!(!outdir.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kira-qc"))
+        .args([&first, &second])
+        .args(["--quiet", "--no-zip", "-t", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for path in [&first, &second] {
+        assert!(
+            path.parent()
+                .unwrap()
+                .join("reads_fastqc/summary.txt")
+                .is_file()
+        );
+    }
+}
+
+#[test]
 fn phred_detection_rules() {
     // Modern high-quality Illumina data must not be read as Phred+64.
     assert_eq!(decide_phred_offset(70, 70, 5_000, Mode::Short), 33);
