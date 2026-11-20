@@ -8,6 +8,17 @@ pub mod zip;
 
 use crate::core::metrics::FinalMetrics;
 use crate::core::model::{FinalizeContext, Mode, Status};
+use std::io::{BufWriter, Write};
+
+fn write_buffered(
+    writer: impl Write,
+    render: impl FnOnce(&mut dyn Write) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut buffered = BufWriter::new(writer);
+    render(&mut buffered)?;
+    buffered.flush()?;
+    Ok(())
+}
 
 /// Modules the report writers know about, in FastQC's order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +243,25 @@ pub fn fmt_int(v: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_report_surfaces_failure_at_the_final_flush() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _data: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let result = write_buffered(Full, |writer| {
+            writer.write_all(b"report")?;
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().to_string(), "disk full");
+    }
 
     #[test]
     fn timestamp_formatting_is_stable() {
